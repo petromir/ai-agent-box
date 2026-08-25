@@ -1,0 +1,16 @@
+# VCS metadata never belongs in a build context
+.git
+.gitignore
+
+# IDE state
+.idea
+.vscode
+
+# Docs and license are not used by the build
+*.md
+LICENSE
+
+# Container artifacts (entrypoint.sh IS copied by the Dockerfile — keep it)
+Dockerfile*
+docker-compose*
+.dockerignore
