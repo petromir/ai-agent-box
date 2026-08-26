@@ -31,7 +31,19 @@ docker run --rm ai-agent-box:local --version
 #    (chown it to 999), then:
 docker run --rm --user 0 -v /path/to/repo:/workspace ai-agent-box:local --version
 # and confirm "adapting uid/gid..." appears on stderr, and inside the
-# container `git -C /workspace status` succeeds.
+# container `git -C /workspace status` succeeds and the adapted user can
+# write to ~/.config/opencode (e.g. `touch` a file there as the user).
+
+# 3. Serve path: the entrypoint injects --hostname 0.0.0.0 for the `serve`
+#    subcommand so a published port reaches the server. Confirm health, and
+#    that an explicit --hostname override is honored.
+docker run --rm -d -p 4096:4096 --name oc-serve ai-agent-box:local serve
+curl -s http://localhost:4096/global/health   # {"healthy":true,"version":"..."}
+docker rm -f oc-serve   # opencode serve ignores SIGTERM/SIGINT; rm -f force-kills
+# Override must bind loopback (unreachable from host via -p):
+docker run --rm -d -p 4097:4097 --name oc-lb ai-agent-box:local serve --port 4097 --hostname 127.0.0.1
+curl -s --max-time 3 http://localhost:4097/global/health || echo unreachable-as-expected
+docker rm -f oc-lb
 ```
 
 Watch for silent regressions in:
@@ -47,6 +59,13 @@ Watch for silent regressions in:
 - **opencode install path** — the installer writes to `$HOME/.opencode/bin`;
   the builder stage pins `ENV HOME=/root` so the `COPY --from=builder` path
   is deterministic.
+- **Home/config ownership** — the runtime home is `/home/ai-agent-box`
+  (keep `adduser -h`, `mkdir`/`chown`, `ENV HOME` in the Dockerfile and
+  `home_dir` in the entrypoint in sync). The image pre-creates
+  `~/.config/opencode` owned by uid 10001; after uid adaptation the
+  entrypoint must chown it (non-recursively) or the adapted user cannot
+  write config/sessions — but must NEVER chown it when it is a bind mount,
+  to avoid altering host file ownership.
 
 ## Conventions
 

@@ -44,9 +44,9 @@ RUN apk add --no-cache \
 # UID/GID above 10,000 avoids overlapping with privileged host users.
 # OpenCode persists config and sessions under $HOME, so the user needs a home directory.
 RUN addgroup -g 10001 -S opencode && \
-    adduser -u 10001 -S -G opencode -h /home/opencode opencode && \
-    mkdir -p /workspace /home/opencode/.config/opencode && \
-    chown -R opencode:opencode /workspace /home/opencode/.config
+    adduser -u 10001 -S -G opencode -h /home/ai-agent-box opencode && \
+    mkdir -p /workspace /home/ai-agent-box/.config/opencode && \
+    chown -R opencode:opencode /workspace /home/ai-agent-box/.config
 
 # Adapts uid/gid to a bind-mounted /workspace owned by a host user (native Linux),
 # marks it git-safe, and execs opencode as the final process. Reverts to plain
@@ -56,7 +56,11 @@ COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 # Install the binary system-wide from the build stage
 COPY --from=builder --chown=root:root --chmod=755 /root/.opencode/bin/opencode /usr/local/bin/opencode
 
-ENV HOME=/home/opencode
+# Documents the default `opencode serve` HTTP port (metadata only; does not
+# publish — use `docker run -p 4096:4096` to expose it on the host).
+EXPOSE 4096
+
+ENV HOME=/home/ai-agent-box
 
 WORKDIR /workspace
 

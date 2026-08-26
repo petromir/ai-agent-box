@@ -12,24 +12,51 @@
 set -euo pipefail
 
 readonly mount_dir=/workspace
-readonly home_dir=/home/opencode
+readonly home_dir=/home/ai-agent-box
 
 log() { printf 'entrypoint: %s\n' "$*" >&2; }
 
-# Ensure ~/.config/opencode exists (OpenCode auto-creates it on first run, but
-# we want it ready and owned by the runtime user). Skips if the tree already
-# exists from a volume mount — we don't recurse into user data to avoid
-# altering host file ownership.
-ensure_config_dir() {
-    if [ -d "${home_dir}/.config/opencode" ]; then
-        return 0
-    fi
-    mkdir -p "${home_dir}/.config/opencode"
-    if [ "$(id -u)" = "0" ]; then
-        chown opencode:opencode "${home_dir}/.config" "${home_dir}/.config/opencode"
-    fi
-    log "created ${home_dir}/.config/opencode"
+is_mounted() {
+    grep -qs " $1 " /proc/mounts
 }
+
+# Ensure ~/.config/opencode exists (OpenCode auto-creates it on first run, but
+# we want it ready and owned by the runtime user). Ownership is fixed
+# non-recursively and never touches bind-mounted host data.
+ensure_config_dir() {
+    if [ ! -d "${home_dir}/.config/opencode" ]; then
+        mkdir -p "${home_dir}/.config/opencode"
+        log "created ${home_dir}/.config/opencode"
+    fi
+    # After uid adaptation the pre-created tree is still owned by the image's
+    # 10001; the adapted user cannot write to it. Skip bind mounts so host
+    # file ownership is never altered.
+    if [ "$(id -u)" = "0" ] && ! is_mounted "${home_dir}/.config"; then
+        chown opencode:opencode "${home_dir}/.config"
+        if ! is_mounted "${home_dir}/.config/opencode"; then
+            chown opencode:opencode "${home_dir}/.config/opencode"
+        fi
+    fi
+}
+
+# opencode serve defaults to --hostname 127.0.0.1 (loopback only), which is
+# unreachable from the host through a published port. In a container we want
+# the server bound to all interfaces so `docker run -p` reaches it out of the
+# box. Inject --hostname 0.0.0.0 only when the subcommand is `serve` and the
+# user has not set --hostname themselves (they can still pass
+# --hostname 127.0.0.1 to restrict to loopback). Runs before the uid-adaptation
+# branch so both exec paths below receive the same args.
+if [ "${1:-}" = "serve" ]; then
+    has_hostname=0
+    for arg in "$@"; do
+        case "$arg" in
+            --hostname|--hostname=*) has_hostname=1; break ;;
+        esac
+    done
+    if [ "$has_hostname" = "0" ]; then
+        set -- "$1" --hostname 0.0.0.0 "${@:2}"
+    fi
+fi
 
 if [ "$(id -u)" = "0" ]; then
     if [ -d "${mount_dir}" ]; then
