@@ -4,7 +4,11 @@
 # When /workspace is a bind mount owned by a host user (native Linux keeps the
 # host uid/gid on mounts), the container's fixed uid 10001 cannot write to the
 # repo and git refuses it with "detected dubious ownership". This script adapts
-# the container identity to the mount owner and then execs opencode.
+# the container identity to the mount owner, then drops privileges via
+# `setpriv` (util-linux's setpriv, which supports --reuid/--regid unlike
+# BusyBox's) directly into opencode. setpriv replaces its own process image via
+# execve rather than forking a supervisor, so opencode itself ends up as PID 1
+# — no wrapper process, nothing to reap, and signals/exit codes are exact.
 #
 # Requires the container to run with --user 0 for the adaptation path; without
 # root the script logs a warning and continues as-is (Docker Desktop on macOS
@@ -39,24 +43,35 @@ ensure_config_dir() {
     fi
 }
 
-# opencode serve defaults to --hostname 127.0.0.1 (loopback only), which is
+# serve/web/acp default to --hostname 127.0.0.1 (loopback only), which is
 # unreachable from the host through a published port. In a container we want
 # the server bound to all interfaces so `docker run -p` reaches it out of the
-# box. Inject --hostname 0.0.0.0 only when the subcommand is `serve` and the
-# user has not set --hostname themselves (they can still pass
-# --hostname 127.0.0.1 to restrict to loopback). Runs before the uid-adaptation
-# branch so both exec paths below receive the same args.
-if [ "${1:-}" = "serve" ]; then
-    has_hostname=0
-    for arg in "$@"; do
-        case "$arg" in
-            --hostname|--hostname=*) has_hostname=1; break ;;
-        esac
-    done
-    if [ "$has_hostname" = "0" ]; then
-        set -- "$1" --hostname 0.0.0.0 "${@:2}"
-    fi
-fi
+# box. Inject --hostname 0.0.0.0 only for these headless-server subcommands
+# (identified as the first non-flag argument, so a leading global flag like
+# --print-logs doesn't defeat the match) and only when the user has not set
+# --hostname themselves (they can still pass --hostname 127.0.0.1 to restrict
+# to loopback). Runs before the uid-adaptation branch so both exec paths below
+# receive the same args.
+headless_cmd=""
+for arg in "$@"; do
+    case "$arg" in
+        -*) continue ;;
+        *) headless_cmd="$arg"; break ;;
+    esac
+done
+case "$headless_cmd" in
+    serve|web|acp)
+        has_hostname=0
+        for arg in "$@"; do
+            case "$arg" in
+                --hostname|--hostname=*) has_hostname=1; break ;;
+            esac
+        done
+        if [ "$has_hostname" = "0" ]; then
+            set -- "$1" --hostname 0.0.0.0 "${@:2}"
+        fi
+        ;;
+esac
 
 if [ "$(id -u)" = "0" ]; then
     if [ -d "${mount_dir}" ]; then
@@ -73,24 +88,32 @@ if [ "$(id -u)" = "0" ]; then
             sed -i -E "s/^opencode:x:[0-9]+:[0-9]+:/opencode:x:${owner_uid}:${owner_gid}:/" /etc/passwd
             sed -i -E "s/^opencode:x:[0-9]+:/opencode:x:${owner_gid}:/" /etc/group
             # HOME must belong to the adapted identity (non-recursive: a
-            # user-mounted config volume inside is left as-is).
-            chown opencode:opencode "${home_dir}"
+            # user-mounted config volume inside is left as-is). Skip when HOME
+            # itself is a bind mount so host file ownership is never altered.
+            if ! is_mounted "${home_dir}"; then
+                chown opencode:opencode "${home_dir}"
+            fi
 
             ensure_config_dir
+        elif [ "${owner_uid}" = "0" ]; then
+            log "mounted workspace is owned by root; uid/gid adaptation skipped"
         fi
     fi
 
     # Trust the workspace for git regardless of who owns it, so the agent's
     # git operations never fail on "dubious ownership".
-    git config --system --add safe.directory /workspace
+    git config --system --add safe.directory "${mount_dir}"
 
-    exec runuser -u opencode -- env HOME="${home_dir}" opencode "$@"
+    # setpriv execve's its target directly (no fork), so this replaces the
+    # current process image in place: opencode ends up running as PID 1 with
+    # no supervising process above it.
+    exec setpriv --reuid opencode --regid opencode --init-groups -- env HOME="${home_dir}" opencode "$@"
 fi
 
 # Non-root invocation: trust any workspace mounted at a well-known path.
 if [ -d "${mount_dir}" ]; then
     log "running without root; uid/gid adaptation skipped (see README: native Linux file ownership)"
-    git config --global --add safe.directory /workspace || true
+    git config --global --add safe.directory "${mount_dir}" || true
 fi
 
 ensure_config_dir

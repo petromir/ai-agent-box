@@ -17,19 +17,48 @@ through a bind mount, with files it creates owned by **you** on native Linux
 ## Build
 
 ```bash
-# Latest OpenCode release (default)
+# Default: builds the pinned OpenCode release (see OPENCODE_VERSION in Dockerfile)
 docker build -t ai-agent-box:latest .
 
-# Pinned OpenCode release
-docker build --build-arg OPENCODE_VERSION=1.18.23 -t ai-agent-box:1.18.23 .
+# Pin a different OpenCode release (bump OPENCODE_VERSION and VERSION together
+# so the installed binary and the OCI version label stay in sync)
+docker build --build-arg OPENCODE_VERSION=1.18.23 --build-arg VERSION=1.18.23 -t ai-agent-box:1.18.23 .
 
-# OCI label metadata
-docker build --build-arg VERSION=1.18.23 --build-arg REVISION="$(git rev-parse --short HEAD)" .
+# Pin a different version of a bundled tool (ripgrep, jq, yq, patch, diffutils)
+docker build --build-arg JQ_VERSION=1.8.2-r1 -t ai-agent-box:latest .
+
+# OCI revision metadata
+docker build --build-arg REVISION="$(git rev-parse --short HEAD)" .
 ```
+
+### Building behind a TLS-intercepting proxy
+
+Corporate networks that TLS-inspect traffic (Zscaler, Netskope, and similar)
+break `apk add`/`curl` inside the build with `certificate verify failed`,
+because the base image's trust store only has public root CAs — it has never
+seen your proxy's private root. Fix it for your build only, without baking
+the CA into the shipped image, using a BuildKit secret:
+
+```bash
+docker build --secret id=external_ca,src=/path/to/your-ca-bundle.pem -t ai-agent-box:latest .
+```
+
+- The secret is mounted into a tmpfs for that build step only; it is never
+  written to an image layer, so it never ships in the image you push or share.
+- Builds without `--secret` are unaffected — this is an opt-in local escape
+  hatch, not a required build input.
+- Get your proxy's root CA from your OS trust store (e.g. macOS Keychain
+  Access → System keychain → export the root certificate authority your
+  security tooling installed) since it's already trusted there for your
+  browser to work behind the same proxy.
 
 ## Run
 
 ### Interactive TUI
+
+> On native Linux, if your host uid is not `10001`, add `--user 0` so the
+> entrypoint can adapt file ownership to your repo — see
+> [On native Linux (file ownership)](#on-native-linux-file-ownership).
 
 ```bash
 cd your-project
@@ -123,10 +152,12 @@ docker stop oc-serve
 
 > Note: the opencode server does not install a graceful-shutdown handler, so
 > it ignores SIGTERM/SIGINT and `docker stop` force-stops it after the grace
-> period (default 10 s). The entrypoint `exec`s opencode as PID 1, so signals
-> reach it directly; this is an upstream behavior, not an entrypoint issue.
-> For immediate teardown use `docker kill oc-serve` (SIGKILL). With `--rm` the
-> container is removed once stopped.
+> period (default 10 s). The entrypoint execs opencode as PID 1 (directly, or
+> via `setpriv` when adapting uid/gid with `--user 0` — `setpriv` replaces its
+> own process image rather than forking, so opencode still ends up as PID 1),
+> so signals reach it directly; this is an upstream behavior, not an
+> entrypoint issue. For immediate teardown use `docker kill oc-serve`
+> (SIGKILL). With `--rm` the container is removed once stopped.
 
 #### Options
 
@@ -136,16 +167,20 @@ docker stop oc-serve
 | `--hostname` | Hostname to bind (image defaults to `0.0.0.0` in serve mode) | `127.0.0.1`* |
 | `--cors` | Additional browser origins (repeatable) | `[]` |
 | `--mdns` | Enable mDNS discovery | `false` |
+| `--mdns-domain` | Custom mDNS domain name | — |
 
 \* The upstream `127.0.0.1` default is loopback-only and unreachable from the
 host through a published port; the image injects `--hostname 0.0.0.0` when you
 run `serve` without an explicit `--hostname`. Pass `--hostname 127.0.0.1` to
 restrict to loopback, or any other value to customize.
 
-Override port and restrict to loopback:
+Override port and restrict to loopback (only reachable via `docker exec` or
+`--network host`, since a loopback-bound server is not reachable through a
+published port):
 
 ```bash
-docker run --rm -d -p 4097:4097 -v "$PWD:/workspace" ai-agent-box:latest serve --port 4097 --hostname 127.0.0.1
+docker run --rm -d -v "$PWD:/workspace" --name oc-lb ai-agent-box:latest serve --port 4097 --hostname 127.0.0.1
+docker exec oc-lb curl -s http://localhost:4097/global/health
 ```
 
 Allow browser origins (CORS):
@@ -212,12 +247,18 @@ invocation works as-is.
 | User | `opencode`, uid/gid 10001 (root only at entry for uid adaptation) |
 | Binary | `/usr/local/bin/opencode` (root-owned, 0755, from the official installer) |
 | Data dirs | `$HOME=/home/ai-agent-box` (writable), `WORKDIR=/workspace` |
-| Size | ~243 MB |
+| Size | ~251 MB (approximate; varies by opencode release) |
 | Entry | `entrypoint.sh` → `opencode`; default `CMD ["--help"]` |
 | Exposed | `4096/tcp` (default `opencode serve` port; metadata only) |
 
-Runtime packages: `bash`, `curl`, `git`, `openssh-client`, `util-linux-su`
-(for `runuser`). The build stage runs the official installer
+Runtime packages: `bash`, `curl`, `git`, `openssh-client`, `setpriv`
+(util-linux's setpriv, used to drop root privileges to the runtime user at
+container start), plus version-pinned agent-efficiency tooling: `ripgrep`
+(fast, gitignore-aware search), `jq` and `yq` (JSON/YAML querying and
+validation), `patch` and `diffutils` (applying unified diffs). Pin each with
+its own `--build-arg` (`RIPGREP_VERSION`, `JQ_VERSION`, `YQ_VERSION`,
+`PATCH_VERSION`, `DIFFUTILS_VERSION`) — same reproducibility rationale as
+`OPENCODE_VERSION`. The build stage runs the official installer
 (`curl -fsSL https://opencode.ai/install | bash`) and copies only the binary
 into the final image — no install toolchain in the runtime layer.
 

@@ -54,8 +54,10 @@ Watch for silent regressions in:
   Wolfi (e.g. there is no `tar` package; busybox provides it). Verify with
   `docker run --rm cgr.dev/chainguard/wolfi-base:latest@sha256:<digest> sh -c 'apk search <pkg>'`.
 - **BusyBox vs GNU tools** — wolfi-base ships BusyBox applets. BusyBox
-  `setpriv` lacks `--reuid/--regid`; that's why `util-linux-su` (runuser)
-  is installed. Check tool flags before relying on them.
+  `setpriv` lacks `--reuid/--regid`; that's why the `setpriv` **package**
+  (util-linux's setpriv, a separate binary from the BusyBox applet of the
+  same name) is installed and used to drop privileges. Check tool flags
+  before relying on them.
 - **opencode install path** — the installer writes to `$HOME/.opencode/bin`;
   the builder stage pins `ENV HOME=/root` so the `COPY --from=builder` path
   is deterministic.
@@ -66,6 +68,16 @@ Watch for silent regressions in:
   entrypoint must chown it (non-recursively) or the adapted user cannot
   write config/sessions — but must NEVER chown it when it is a bind mount,
   to avoid altering host file ownership.
+- **TLS-intercepting build networks** — if `apk add`/`curl` fail in a `RUN`
+  step with `certificate verify failed`, that's a local/corporate proxy MITM
+  issue, not a Dockerfile bug (confirm by checking `docker info` for a
+  configured HTTP/HTTPS proxy). Both stages already have a
+  `RUN --mount=type=secret,id=external_ca,required=false` step before their
+  first network call, documented in README.md's "Building behind a
+  TLS-intercepting proxy" — pass `--secret id=external_ca,src=<ca-bundle.pem>`
+  to trust a local proxy CA for that build only. Never "fix" this by baking a
+  CA into a `COPY`/`ARG` instead — that would ship a private, meaningless (or
+  actively risky) root CA to everyone who pulls the published image.
 
 ## Conventions
 
