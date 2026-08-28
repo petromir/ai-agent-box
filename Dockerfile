@@ -84,8 +84,10 @@ RUN apk add --no-cache \
 # OpenCode persists config and sessions under $HOME, so the user needs a home directory.
 RUN addgroup -g 10001 -S opencode && \
     adduser -u 10001 -S -G opencode -h /home/ai-agent-box opencode && \
-    mkdir -p /workspace /home/ai-agent-box/.config/opencode && \
-    chown -R opencode:opencode /workspace /home/ai-agent-box/.config
+    mkdir -p /workspace /home/ai-agent-box/.config/opencode \
+             /home/ai-agent-box/.local/share/opencode && \
+    chown -R opencode:opencode /workspace /home/ai-agent-box/.config \
+                               /home/ai-agent-box/.local
 
 # Adapts uid/gid to a bind-mounted /workspace owned by a host user (native Linux),
 # marks it git-safe, and execs opencode as the final process. Reverts to plain

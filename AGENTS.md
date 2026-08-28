@@ -37,9 +37,9 @@ docker run --rm --user 0 -v /path/to/repo:/workspace ai-agent-box:local --versio
 # 3. Serve path: the entrypoint injects --hostname 0.0.0.0 for the `serve`
 #    subcommand so a published port reaches the server. Confirm health, and
 #    that an explicit --hostname override is honored.
-docker run --rm -d -p 4096:4096 --name oc-serve ai-agent-box:local serve
+docker run --rm -d -p 4096:4096 --name opencode-server ai-agent-box:local serve
 curl -s http://localhost:4096/global/health   # {"healthy":true,"version":"..."}
-docker rm -f oc-serve   # opencode serve ignores SIGTERM/SIGINT; rm -f force-kills
+docker rm -f opencode-server   # opencode serve ignores SIGTERM/SIGINT; rm -f force-kills
 # Override must bind loopback (unreachable from host via -p):
 docker run --rm -d -p 4097:4097 --name oc-lb ai-agent-box:local serve --port 4097 --hostname 127.0.0.1
 curl -s --max-time 3 http://localhost:4097/global/health || echo unreachable-as-expected
@@ -107,6 +107,12 @@ supported when changing the runtime stage:
   non-root by default per the Conventions below.
 - Wolfi package names may differ from Alpine's; derived-image authors must
   verify names the same way this repo does (see "Wolfi package names" above).
+- Toolchains installed on top may need env vars the Wolfi packages do not
+  set (e.g. `JAVA_HOME` for Maven). The README's derived-image example sets
+  these; keep it accurate if the base image's paths or layout change.
+- Language build caches (Maven `.m2`, pip `.cache/pip`, Gradle `.gradle`)
+  land in `$HOME` — keep `$HOME=/home/ai-agent-box` writable and owned by
+  the runtime user so these work without extra setup.
 - `ENTRYPOINT`/`CMD` are inherited by derived images automatically; do not
   add logic to this repo's `entrypoint.sh` that assumes it is always the
   final image (e.g. do not hardcode a package list check) — a derived image
@@ -118,6 +124,16 @@ supported when changing the runtime stage:
 - This is a documentation/consumer-workflow concern, not a code change here;
   keep the "Using this image as a base" section in README.md in sync if the
   final `USER`, `HOME`, or package-manager story in the Dockerfile changes.
+- `java.Dockerfile` is the in-repo worked example of this pattern (Liberica
+  JDK 25, mvnd, Python 3.13 via pinned, checksum-verified downloads — NOT
+  SDKMAN, which is per-user and non-reproducible). Verify it after any base
+  change: `docker build -t ai-agent-box:local . && docker build -f
+  java.Dockerfile --build-arg BASE_IMAGE=ai-agent-box:local -t ai-agent-box:java .`
+  and run the same default/uid-adaptation/serve checks against
+  `ai-agent-box:java`. When bumping its pinned tool versions, refresh the
+  checksums: Liberica SHA1s via `api.bell-sw.com/v1/liberica/releases`
+  (use `arch=x86`/`arch=arm`), mvnd SHA256s from the `.sha256` files next to
+  the tarballs on archive.apache.org.
 
 ## Environment notes
 

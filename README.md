@@ -124,7 +124,7 @@ server to `0.0.0.0` in serve mode so a published port reaches it — you don't
 need to pass `--hostname` yourself.
 
 ```bash
-docker run --rm -d -p 4096:4096 -v "$PWD:/workspace" --name oc-serve ai-agent-box:latest serve
+docker run --rm -d -p 4096:4096 -v "$PWD:/workspace" --name opencode-server ai-agent-box:latest serve
 ```
 
 - `-p 4096:4096` — publish the default serve port to the host
@@ -147,7 +147,7 @@ open http://localhost:4096/doc
 Stop the server:
 
 ```bash
-docker stop oc-serve
+docker stop opencode-server
 ```
 
 > Note: the opencode server does not install a graceful-shutdown handler, so
@@ -156,7 +156,7 @@ docker stop oc-serve
 > via `setpriv` when adapting uid/gid with `--user 0` — `setpriv` replaces its
 > own process image rather than forking, so opencode still ends up as PID 1),
 > so signals reach it directly; this is an upstream behavior, not an
-> entrypoint issue. For immediate teardown use `docker kill oc-serve`
+> entrypoint issue. For immediate teardown use `docker kill opencode-server`
 > (SIGKILL). With `--rm` the container is removed once stopped.
 
 #### Options
@@ -274,10 +274,20 @@ FROM ai-agent-box:latest
 # root to install packages, then drop privileges again.
 USER root
 
+# Pin versions the same way the base image does, so your build stays
+# reproducible when Wolfi ships new stable builds.
+ARG PYTHON_VERSION=3.13
+ARG OPENJDK_VERSION=17
+
 RUN apk add --no-cache \
-    python3 \
+    python-3.13 \
     openjdk-17 \
-    maven
+    maven-3.9
+
+# Wolfi's JDK packages install under /usr/lib/jvm and do NOT add java to PATH
+# or set JAVA_HOME — do both explicitly (Maven needs JAVA_HOME).
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk \
+    PATH="${JAVA_HOME}/bin:${PATH}"
 
 USER opencode
 ```
@@ -294,12 +304,24 @@ Things to keep in mind:
   ```bash
   docker run --rm cgr.dev/chainguard/wolfi-base:latest sh -c 'apk search <pkg>'
   ```
+- **Pin package versions for reproducibility.** Wolfi is a rolling
+  distribution; an unpinned `apk add maven` gives you whatever is current.
+  Either pin explicit versions (`maven=3.9.x-rN`) like the base image's
+  `ARG`/`--build-arg` pattern, or accept that rebuilds may drift.
+- **Set toolchain env vars explicitly.** `JAVA_HOME` is not set by the Wolfi
+  JDK packages; Maven and many build tools need it. Add the JDK's `bin` to
+  `PATH` if you want plain `java`/`javac` on the command line.
 - **`ENTRYPOINT`/`CMD` are inherited automatically.** Unless you want
   different default behavior, leave them as-is so your derived image still
   runs OpenCode. Override `CMD` (or `ENTRYPOINT`) explicitly if you need to.
 - **Preserve ownership under `/home/ai-agent-box`.** Anything you `COPY` or
   create there should be `chown`ed to `opencode:opencode` (uid/gid 10001), or
   the runtime user won't be able to write to it.
+- **Give build caches a writable home.** Maven (`.m2`), pip (`.cache/pip`),
+  and Gradle (`.gradle`) all write under `$HOME` by default — which is
+  `/home/ai-agent-box` and writable, so this works out of the box. To persist
+  caches across containers, mount a volume, e.g.
+  `-v maven-cache:/home/ai-agent-box/.m2`.
 - **Reuse the TLS-intercepting-proxy pattern if needed.** If you're behind a
   corporate MITM proxy, mount an external CA the same way this repo's
   Dockerfile does (see [Building behind a TLS-intercepting
@@ -308,6 +330,39 @@ Things to keep in mind:
 - **Expect the image to grow.** Toolchains like a JDK and Maven add real
   weight (often 300–500 MB combined); the "minimal" sizing in this README
   applies to the unmodified base image, not your derived one.
+
+### Worked example: `java.Dockerfile`
+
+This repo ships [`java.Dockerfile`](java.Dockerfile) as a canonical derived
+image: it layers BellSoft Liberica JDK 25, Maven Daemon (`mvnd`, which bundles
+Maven), and Python 3.13 on top of the base image. It demonstrates the pattern
+recommended above: pinned, checksum-verified tarball downloads installed
+system-wide for tools Wolfi does not package (SDKMAN was considered and
+rejected — it is per-user, writes to `$HOME`, and depends on a live version
+catalog, so builds are not reproducible).
+
+Build and verify:
+
+```bash
+docker build -t ai-agent-box:local .
+docker build -f java.Dockerfile --build-arg BASE_IMAGE=ai-agent-box:local -t ai-agent-box:java .
+docker run --rm --entrypoint bash ai-agent-box:java -c 'java -version && mvnd --version && python3 --version'
+```
+
+### Verifying a derived image
+
+After building, confirm your tooling works and the inherited behavior is
+intact:
+
+```bash
+docker build -t my-agent-box .
+docker run --rm my-agent-box --version          # OpenCode still runs
+docker run --rm my-agent-box run "run: java -version && mvn -version && python3 --version"
+```
+
+The uid-adaptation (`--user 0`) and `serve` hostname injection described
+above work unchanged in derived images, since they live in the inherited
+entrypoint.
 
 ## API keys
 
