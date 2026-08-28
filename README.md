@@ -262,6 +262,53 @@ its own `--build-arg` (`RIPGREP_VERSION`, `JQ_VERSION`, `YQ_VERSION`,
 (`curl -fsSL https://opencode.ai/install | bash`) and copies only the binary
 into the final image — no install toolchain in the runtime layer.
 
+## Using this image as a base
+
+You can layer extra tools (Python, Java, Maven, etc.) on top of this image by
+using it as a base in your own Dockerfile:
+
+```dockerfile
+FROM ai-agent-box:latest
+
+# The runtime stage ends on `USER opencode` (uid 10001), so switch back to
+# root to install packages, then drop privileges again.
+USER root
+
+RUN apk add --no-cache \
+    python3 \
+    openjdk-17 \
+    maven
+
+USER opencode
+```
+
+Things to keep in mind:
+
+- **Switch to `USER root` before `apk add`, then back to `USER opencode`.**
+  The base image is non-root by default; installing packages needs root, but
+  the final image should stay non-root unless you have a specific reason not
+  to.
+- **Verify Wolfi package names before installing.** This image is built on
+  Chainguard Wolfi, whose package names sometimes differ from Alpine's (or
+  don't exist at all). Check first:
+  ```bash
+  docker run --rm cgr.dev/chainguard/wolfi-base:latest sh -c 'apk search <pkg>'
+  ```
+- **`ENTRYPOINT`/`CMD` are inherited automatically.** Unless you want
+  different default behavior, leave them as-is so your derived image still
+  runs OpenCode. Override `CMD` (or `ENTRYPOINT`) explicitly if you need to.
+- **Preserve ownership under `/home/ai-agent-box`.** Anything you `COPY` or
+  create there should be `chown`ed to `opencode:opencode` (uid/gid 10001), or
+  the runtime user won't be able to write to it.
+- **Reuse the TLS-intercepting-proxy pattern if needed.** If you're behind a
+  corporate MITM proxy, mount an external CA the same way this repo's
+  Dockerfile does (see [Building behind a TLS-intercepting
+  proxy](#building-behind-a-tls-intercepting-proxy)) before your own
+  `apk add`/`curl` calls.
+- **Expect the image to grow.** Toolchains like a JDK and Maven add real
+  weight (often 300–500 MB combined); the "minimal" sizing in this README
+  applies to the unmodified base image, not your derived one.
+
 ## API keys
 
 OpenCode stores provider credentials under

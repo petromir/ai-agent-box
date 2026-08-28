@@ -94,6 +94,31 @@ Watch for silent regressions in:
 - After changes, update `README.md` (image details, usage) if behavior,
   packages, or usage patterns changed.
 
+## Extending this image as a base
+
+Users may build their own Dockerfile with `FROM ai-agent-box:<tag-or-digest>`
+to layer extra tools (e.g. Python, Java, Maven) on top. Keep this workflow
+supported when changing the runtime stage:
+
+- The runtime stage ends on `USER opencode` (uid 10001), a non-root user.
+  Derived Dockerfiles must `USER root` before any `apk add`, then `USER
+  opencode` again afterward — do not remove or reorder the final `USER
+  opencode` in this repo's Dockerfile to "help" that use case; it stays
+  non-root by default per the Conventions below.
+- Wolfi package names may differ from Alpine's; derived-image authors must
+  verify names the same way this repo does (see "Wolfi package names" above).
+- `ENTRYPOINT`/`CMD` are inherited by derived images automatically; do not
+  add logic to this repo's `entrypoint.sh` that assumes it is always the
+  final image (e.g. do not hardcode a package list check) — a derived image
+  adding tools must not break the base entrypoint's uid-adaptation or serve
+  hostname-injection behavior.
+- Anything a derived Dockerfile adds under `/home/ai-agent-box` must be
+  `chown`ed to `opencode:opencode` (uid/gid 10001), matching this repo's
+  own pattern, or the runtime user won't be able to write to it.
+- This is a documentation/consumer-workflow concern, not a code change here;
+  keep the "Using this image as a base" section in README.md in sync if the
+  final `USER`, `HOME`, or package-manager story in the Dockerfile changes.
+
 ## Environment notes
 
 - The host is macOS + Docker Desktop in this workspace; ownership squashing
