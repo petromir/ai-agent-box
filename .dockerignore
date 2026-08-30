@@ -10,7 +10,8 @@
 *.md
 LICENSE
 
-# Container artifacts (entrypoint.sh IS copied by the Dockerfile — keep it)
-Dockerfile*
+# Container artifacts (entrypoint.sh and omp-entrypoint.sh ARE copied by the
+# Dockerfiles — keep them)
+opencode.Dockerfile
 docker-compose*
 .dockerignore

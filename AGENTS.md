@@ -8,17 +8,17 @@ Guidance for AI coding agents working in this repository.
 [OpenCode](https://opencode.ai) AI coding agent in an isolated, minimal
 Wolfi container. It is intentionally tiny:
 
-- `Dockerfile` — two-stage build (installer stage → runtime stage)
+- `opencode.Dockerfile` — two-stage build (installer stage → runtime stage)
 - `entrypoint.sh` — start-up script handling uid/gid adaptation for bind
   mounts
 - `README.md`, `LICENSE`, `.dockerignore` — docs and build hygiene
 
 There is no application code, no test suite, and no CI pipeline. Changes are
-almost always to the Dockerfile or entrypoint script.
+almost always to the opencode.Dockerfile or entrypoint script.
 
 ## Verify every change
 
-Any Dockerfile or entrypoint change MUST be verified by actually building and
+Any opencode.Dockerfile or entrypoint change MUST be verified by actually building and
 running the image — not just by reading the diff:
 
 ```bash
@@ -62,7 +62,7 @@ Watch for silent regressions in:
   the builder stage pins `ENV HOME=/root` so the `COPY --from=builder` path
   is deterministic.
 - **Home/config ownership** — the runtime home is `/home/ai-agent-box`
-  (keep `adduser -h`, `mkdir`/`chown`, `ENV HOME` in the Dockerfile and
+  (keep `adduser -h`, `mkdir`/`chown`, `ENV HOME` in the opencode.Dockerfile and
   `home_dir` in the entrypoint in sync). The image pre-creates
   `~/.config/opencode` owned by uid 10001; after uid adaptation the
   entrypoint must chown it (non-recursively) or the adapted user cannot
@@ -88,8 +88,8 @@ Watch for silent regressions in:
 - No secrets in the image or in `ENV`/`ARG` — credentials are mounted or
   passed at `docker run` time.
 - OCI label args (`VERSION`, `REVISION`) are for automation; do not hardcode
-  build metadata into the Dockerfile.
-- Comments in the Dockerfile explain *why*, not *what*; keep them when
+  build metadata into the opencode.Dockerfile.
+- Comments in the opencode.Dockerfile explain *why*, not *what*; keep them when
   editing.
 - After changes, update `README.md` (image details, usage) if behavior,
   packages, or usage patterns changed.
