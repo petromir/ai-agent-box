@@ -8,21 +8,25 @@ Guidance for AI coding agents working in this repository.
 [OpenCode](https://opencode.ai) AI coding agent in an isolated, minimal
 Wolfi container. It is intentionally tiny:
 
-- `opencode.Dockerfile` — two-stage build (installer stage → runtime stage)
-- `entrypoint.sh` — start-up script handling uid/gid adaptation for bind
+- `opencode/opencode.Dockerfile` — two-stage build (installer stage → runtime stage)
+- `opencode/opencode-entrypoint.sh` — start-up script handling uid/gid adaptation for bind
   mounts
+- `omp/omp.Dockerfile`, `omp/omp-entrypoint.sh` — parallel variant of the same
+  box running the [omp](https://omp.sh) (Oh-My-Pi) agent instead of OpenCode
+- `java/java.Dockerfile` — worked example of a derived image (see "Extending
+  this image as a base")
 - `README.md`, `LICENSE`, `.dockerignore` — docs and build hygiene
 
 There is no application code, no test suite, and no CI pipeline. Changes are
-almost always to the opencode.Dockerfile or entrypoint script.
+almost always to the opencode/opencode.Dockerfile or entrypoint script.
 
 ## Verify every change
 
-Any opencode.Dockerfile or entrypoint change MUST be verified by actually building and
+Any opencode/opencode.Dockerfile or entrypoint change MUST be verified by actually building and
 running the image — not just by reading the diff:
 
 ```bash
-docker build -t ai-agent-box:local .
+docker build -f opencode/opencode.Dockerfile -t ai-agent-box:local .
 
 # 1. Default (non-root) path
 docker run --rm ai-agent-box:local --version
@@ -46,6 +50,22 @@ curl -s --max-time 3 http://localhost:4097/global/health || echo unreachable-as-
 docker rm -f oc-lb
 ```
 
+The omp variant carries the same obligation (there is no serve check — omp has
+no HTTP server; its entry points are the TUI, one-shot `-p`, RPC, and ACP over
+stdio):
+
+```bash
+docker build -f omp/omp.Dockerfile -t ai-agent-box:omp-local .
+
+# 1. Default (non-root) path
+docker run --rm ai-agent-box:omp-local --version   # omp/<version>
+
+# 2. Root/uid-adaptation path: same foreign-uid setup as above, then:
+docker run --rm --user 0 -v /path/to/repo:/workspace ai-agent-box:omp-local --version
+# and confirm "adapting uid/gid..." appears on stderr and the adapted user
+# can write to ~/.omp (e.g. `touch` a file there as the user).
+```
+
 Watch for silent regressions in:
 
 - **Base image** — pinned by digest in both stages; if you bump it, bump BOTH
@@ -62,12 +82,23 @@ Watch for silent regressions in:
   the builder stage pins `ENV HOME=/root` so the `COPY --from=builder` path
   is deterministic.
 - **Home/config ownership** — the runtime home is `/home/ai-agent-box`
-  (keep `adduser -h`, `mkdir`/`chown`, `ENV HOME` in the opencode.Dockerfile and
+  (keep `adduser -h`, `mkdir`/`chown`, `ENV HOME` in the opencode/opencode.Dockerfile and
   `home_dir` in the entrypoint in sync). The image pre-creates
-  `~/.config/opencode` owned by uid 10001; after uid adaptation the
-  entrypoint must chown it (non-recursively) or the adapted user cannot
-  write config/sessions — but must NEVER chown it when it is a bind mount,
-  to avoid altering host file ownership.
+  `~/.config/opencode` and `~/.local/share/opencode` owned by uid 10001;
+  after uid adaptation the entrypoint must chown both (non-recursively) or
+  the adapted user cannot write config/sessions — but must NEVER chown them
+  when they are bind mounts, to avoid altering host file ownership.
+- **omp installer flags** — `omp/omp.Dockerfile` pins the release via
+  `sh -s -- --binary --ref ${OMP_VERSION}`; `--ref` WITHOUT `--binary`
+  switches the installer to a from-source install via bun (slow,
+  non-reproducible). Keep `OMP_VERSION` and the `VERSION` label arg in sync,
+  same as `OPENCODE_VERSION`/`VERSION` above.
+- **omp has no serve mode** — never add `--hostname` injection or `EXPOSE` to
+  the omp variant; injecting a flag into `omp acp` breaks the stdio protocol.
+- **omp home ownership** — the omp image pre-creates `~/.omp` owned by uid
+  10001; after uid adaptation `omp/omp-entrypoint.sh` must chown it
+  (non-recursively) and NEVER when it is a bind mount — same rule as the
+  opencode dirs above.
 - **TLS-intercepting build networks** — if `apk add`/`curl` fail in a `RUN`
   step with `certificate verify failed`, that's a local/corporate proxy MITM
   issue, not a Dockerfile bug (confirm by checking `docker info` for a
@@ -88,8 +119,8 @@ Watch for silent regressions in:
 - No secrets in the image or in `ENV`/`ARG` — credentials are mounted or
   passed at `docker run` time.
 - OCI label args (`VERSION`, `REVISION`) are for automation; do not hardcode
-  build metadata into the opencode.Dockerfile.
-- Comments in the opencode.Dockerfile explain *why*, not *what*; keep them when
+  build metadata into the opencode/opencode.Dockerfile.
+- Comments in the opencode/opencode.Dockerfile explain *why*, not *what*; keep them when
   editing.
 - After changes, update `README.md` (image details, usage) if behavior,
   packages, or usage patterns changed.
@@ -103,7 +134,7 @@ supported when changing the runtime stage:
 - The runtime stage ends on `USER opencode` (uid 10001), a non-root user.
   Derived Dockerfiles must `USER root` before any `apk add`, then `USER
   opencode` again afterward — do not remove or reorder the final `USER
-  opencode` in this repo's Dockerfile to "help" that use case; it stays
+  opencode` in this repo's `opencode/opencode.Dockerfile` to "help" that use case; it stays
   non-root by default per the Conventions below.
 - Wolfi package names may differ from Alpine's; derived-image authors must
   verify names the same way this repo does (see "Wolfi package names" above).
@@ -114,7 +145,7 @@ supported when changing the runtime stage:
   land in `$HOME` — keep `$HOME=/home/ai-agent-box` writable and owned by
   the runtime user so these work without extra setup.
 - `ENTRYPOINT`/`CMD` are inherited by derived images automatically; do not
-  add logic to this repo's `entrypoint.sh` that assumes it is always the
+  add logic to this repo's `opencode/opencode-entrypoint.sh` that assumes it is always the
   final image (e.g. do not hardcode a package list check) — a derived image
   adding tools must not break the base entrypoint's uid-adaptation or serve
   hostname-injection behavior.
@@ -123,12 +154,13 @@ supported when changing the runtime stage:
   own pattern, or the runtime user won't be able to write to it.
 - This is a documentation/consumer-workflow concern, not a code change here;
   keep the "Using this image as a base" section in README.md in sync if the
-  final `USER`, `HOME`, or package-manager story in the Dockerfile changes.
-- `java.Dockerfile` is the in-repo worked example of this pattern (Liberica
+  final `USER`, `HOME`, or package-manager story in the
+  `opencode/opencode.Dockerfile` changes.
+- `java/java.Dockerfile` is the in-repo worked example of this pattern (Liberica
   JDK 25, mvnd, Python 3.13 via pinned, checksum-verified downloads — NOT
   SDKMAN, which is per-user and non-reproducible). Verify it after any base
-  change: `docker build -t ai-agent-box:local . && docker build -f
-  java.Dockerfile --build-arg BASE_IMAGE=ai-agent-box:local -t ai-agent-box:java .`
+  change: `docker build -f opencode/opencode.Dockerfile -t ai-agent-box:local . && docker build -f
+  java/java.Dockerfile --build-arg BASE_IMAGE=ai-agent-box:local -t ai-agent-box:java .`
   and run the same default/uid-adaptation/serve checks against
   `ai-agent-box:java`. When bumping its pinned tool versions, refresh the
   checksums: Liberica SHA1s via `api.bell-sw.com/v1/liberica/releases`

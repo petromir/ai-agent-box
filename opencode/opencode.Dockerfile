@@ -18,8 +18,9 @@ RUN apk add --no-cache \
     bash \
     curl
 
-# Pin a known-good release so `docker build .` is reproducible by default and
-# the OCI version label below always matches what's actually installed.
+# Pin a known-good release so `docker build -f opencode/opencode.Dockerfile .`
+# is reproducible by default and the OCI version label below always matches
+# what's actually installed.
 # Override both --build-arg OPENCODE_VERSION and --build-arg VERSION together
 # to bump or to pin a different release.
 ARG OPENCODE_VERSION=1.18.23
@@ -35,8 +36,8 @@ RUN set -o pipefail && \
 FROM cgr.dev/chainguard/wolfi-base:latest@sha256:a31344ab2cb8618db84f535eec56f76f6178b142cb92cb2e48676cc2dcebea72
 
 # Metadata for organization and automation. VERSION defaults to match
-# OPENCODE_VERSION above so a plain `docker build .` produces an accurate
-# label without extra args; keep the two in sync when bumping.
+# OPENCODE_VERSION above so a plain `docker build -f opencode/opencode.Dockerfile .`
+# produces an accurate label without extra args; keep the two in sync when bumping.
 ARG REVISION=unknown
 ARG VERSION=1.18.23
 LABEL org.opencontainers.image.title="OpenCode" \
@@ -47,9 +48,10 @@ LABEL org.opencontainers.image.title="OpenCode" \
       org.opencontainers.image.revision="${REVISION}"
 
 # Agent-efficiency tooling, version-pinned (stable Wolfi builds only) so a
-# plain `docker build .` stays reproducible, same rationale as OPENCODE_VERSION
-# above. Bump these independently via --build-arg as Wolfi ships new stable
-# builds; check available versions with the Wolfi package index before bumping.
+# plain `docker build -f opencode/opencode.Dockerfile .` stays reproducible,
+# same rationale as OPENCODE_VERSION above. Bump these independently via
+# --build-arg as Wolfi ships new stable builds; check available versions with
+# the Wolfi package index before bumping.
 ARG RIPGREP_VERSION=15.2.0-r2
 ARG JQ_VERSION=1.8.2-r1
 ARG YQ_VERSION=4.53.6-r1
@@ -92,7 +94,7 @@ RUN addgroup -g 10001 -S opencode && \
 # Adapts uid/gid to a bind-mounted /workspace owned by a host user (native Linux),
 # marks it git-safe, and execs opencode as the final process. Reverts to plain
 # opencode when no /workspace is mounted.
-COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chmod=755 opencode/opencode-entrypoint.sh /usr/local/bin/opencode-entrypoint.sh
 
 # Install the binary system-wide from the build stage
 COPY --from=builder --chown=root:root --chmod=755 /root/.opencode/bin/opencode /usr/local/bin/opencode
@@ -107,6 +109,6 @@ WORKDIR /workspace
 
 USER opencode
 
-ENTRYPOINT ["entrypoint.sh"]
+ENTRYPOINT ["opencode-entrypoint.sh"]
 
 CMD ["--help"]

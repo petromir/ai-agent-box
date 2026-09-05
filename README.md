@@ -14,21 +14,24 @@ Linux userland instead — while still letting it work on your real repository
 through a bind mount, with files it creates owned by **you** on native Linux
 (not by a container uid).
 
+Prefer [omp](https://omp.sh) (Oh-My-Pi) over OpenCode? The same box is
+available as the [omp variant](#variant-omp-oh-my-pi).
+
 ## Build
 
 ```bash
-# Default: builds the pinned OpenCode release (see OPENCODE_VERSION in Dockerfile)
-docker build -t ai-agent-box:latest .
+# Default: builds the pinned OpenCode release (see OPENCODE_VERSION in opencode/opencode.Dockerfile)
+docker build -f opencode/opencode.Dockerfile -t ai-agent-box:latest .
 
 # Pin a different OpenCode release (bump OPENCODE_VERSION and VERSION together
 # so the installed binary and the OCI version label stay in sync)
-docker build --build-arg OPENCODE_VERSION=1.18.23 --build-arg VERSION=1.18.23 -t ai-agent-box:1.18.23 .
+docker build -f opencode/opencode.Dockerfile --build-arg OPENCODE_VERSION=1.18.23 --build-arg VERSION=1.18.23 -t ai-agent-box:1.18.23 .
 
 # Pin a different version of a bundled tool (ripgrep, jq, yq, patch, diffutils)
-docker build --build-arg JQ_VERSION=1.8.2-r1 -t ai-agent-box:latest .
+docker build -f opencode/opencode.Dockerfile --build-arg JQ_VERSION=1.8.2-r1 -t ai-agent-box:latest .
 
 # OCI revision metadata
-docker build --build-arg REVISION="$(git rev-parse --short HEAD)" .
+docker build -f opencode/opencode.Dockerfile --build-arg REVISION="$(git rev-parse --short HEAD)" .
 ```
 
 ### Building behind a TLS-intercepting proxy
@@ -40,7 +43,7 @@ seen your proxy's private root. Fix it for your build only, without baking
 the CA into the shipped image, using a BuildKit secret:
 
 ```bash
-docker build --secret id=external_ca,src=/path/to/your-ca-bundle.pem -t ai-agent-box:latest .
+docker build -f opencode/opencode.Dockerfile --secret id=external_ca,src=/path/to/your-ca-bundle.pem -t ai-agent-box:latest .
 ```
 
 - The secret is mounted into a tmpfs for that build step only; it is never
@@ -248,7 +251,7 @@ invocation works as-is.
 | Binary | `/usr/local/bin/opencode` (root-owned, 0755, from the official installer) |
 | Data dirs | `$HOME=/home/ai-agent-box` (writable), `WORKDIR=/workspace` |
 | Size | ~251 MB (approximate; varies by opencode release) |
-| Entry | `entrypoint.sh` → `opencode`; default `CMD ["--help"]` |
+| Entry | `opencode-entrypoint.sh` → `opencode`; default `CMD ["--help"]` |
 | Exposed | `4096/tcp` (default `opencode serve` port; metadata only) |
 
 Runtime packages: `bash`, `curl`, `git`, `openssh-client`, `setpriv`
@@ -261,6 +264,50 @@ its own `--build-arg` (`RIPGREP_VERSION`, `JQ_VERSION`, `YQ_VERSION`,
 `OPENCODE_VERSION`. The build stage runs the official installer
 (`curl -fsSL https://opencode.ai/install | bash`) and copies only the binary
 into the final image — no install toolchain in the runtime layer.
+
+## Variant: omp (Oh-My-Pi)
+
+[`omp/omp.Dockerfile`](omp/omp.Dockerfile) builds the same hardened box around
+[omp](https://omp.sh) (Oh-My-Pi) instead of OpenCode — same digest-pinned
+Wolfi base, same non-root uid 10001 with bind-mount uid/gid adaptation, same
+bundled tooling. The agent is installed via the official installer
+(`curl -fsSL https://omp.sh/install | sh`), pinned to a known-good release
+(`OMP_VERSION`), and only the binary is copied into the final image.
+
+```bash
+docker build -f omp/omp.Dockerfile -t ai-agent-box:omp .
+
+# Pin a different omp release (bump OMP_VERSION and VERSION together so the
+# installed binary and the OCI version label stay in sync)
+docker build -f omp/omp.Dockerfile \
+  --build-arg OMP_VERSION=v18.0.10 --build-arg VERSION=v18.0.10 \
+  -t ai-agent-box:omp .
+
+# Interactive TUI
+docker run -it --rm -v "$PWD:/workspace" ai-agent-box:omp
+
+# One-shot prompt
+docker run -it --rm -v "$PWD:/workspace" ai-agent-box:omp -p "explain this repo"
+
+# Persist config and sessions across containers
+docker run -it --rm -v "$PWD:/workspace" \
+  -v "$HOME/.omp:/home/ai-agent-box/.omp" ai-agent-box:omp
+```
+
+Differences from the OpenCode image:
+
+| Property | omp image |
+|----------|-----------|
+| Binary | `/usr/local/bin/omp` (root-owned, 0755, from the official installer) |
+| User | `omp`, uid/gid 10001 (root only at entry for uid adaptation) |
+| Config/data dir | `$HOME/.omp` (`/home/ai-agent-box/.omp`) — mount it to persist config and sessions |
+| Entry | `omp-entrypoint.sh` → `omp`; default `CMD ["--help"]` |
+| Server mode | none — omp's entry points are the TUI, one-shot `-p`, RPC, and ACP over stdio, so the image has no `EXPOSE` and the entrypoint injects no `--hostname` |
+
+The uid/gid adaptation on native Linux works exactly as described in
+[On native Linux (file ownership)](#on-native-linux-file-ownership): start
+with `--user 0` and the entrypoint adapts to your repo's owner before
+exec'ing omp.
 
 ## Using this image as a base
 
@@ -324,16 +371,16 @@ Things to keep in mind:
   `-v maven-cache:/home/ai-agent-box/.m2`.
 - **Reuse the TLS-intercepting-proxy pattern if needed.** If you're behind a
   corporate MITM proxy, mount an external CA the same way this repo's
-  Dockerfile does (see [Building behind a TLS-intercepting
+  opencode/opencode.Dockerfile does (see [Building behind a TLS-intercepting
   proxy](#building-behind-a-tls-intercepting-proxy)) before your own
   `apk add`/`curl` calls.
 - **Expect the image to grow.** Toolchains like a JDK and Maven add real
   weight (often 300–500 MB combined); the "minimal" sizing in this README
   applies to the unmodified base image, not your derived one.
 
-### Worked example: `java.Dockerfile`
+### Worked example: `java/java.Dockerfile`
 
-This repo ships [`java.Dockerfile`](java.Dockerfile) as a canonical derived
+This repo ships [`java/java.Dockerfile`](java/java.Dockerfile) as a canonical derived
 image: it layers BellSoft Liberica JDK 25, Maven Daemon (`mvnd`, which bundles
 Maven), and Python 3.13 on top of the base image. It demonstrates the pattern
 recommended above: pinned, checksum-verified tarball downloads installed
@@ -344,8 +391,8 @@ catalog, so builds are not reproducible).
 Build and verify:
 
 ```bash
-docker build -t ai-agent-box:local .
-docker build -f java.Dockerfile --build-arg BASE_IMAGE=ai-agent-box:local -t ai-agent-box:java .
+docker build -f opencode/opencode.Dockerfile -t ai-agent-box:local .
+docker build -f java/java.Dockerfile --build-arg BASE_IMAGE=ai-agent-box:local -t ai-agent-box:java .
 docker run --rm --entrypoint bash ai-agent-box:java -c 'java -version && mvnd --version && python3 --version'
 ```
 

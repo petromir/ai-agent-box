@@ -43,6 +43,23 @@ ensure_config_dir() {
     fi
 }
 
+# Same ownership fix for the pre-created data tree (~/.local/share/opencode,
+# where sessions/auth live and opencode writes repos/ on startup): after uid
+# adaptation it is still owned by the image's 10001 and opencode fails with
+# EACCES. Skip bind mounts (e.g. a persisted data dir from the host) so host
+# file ownership is never altered.
+ensure_data_dir() {
+    if [ "$(id -u)" = "0" ] && ! is_mounted "${home_dir}/.local"; then
+        chown opencode:opencode "${home_dir}/.local"
+        if ! is_mounted "${home_dir}/.local/share"; then
+            chown opencode:opencode "${home_dir}/.local/share"
+            if ! is_mounted "${home_dir}/.local/share/opencode"; then
+                chown opencode:opencode "${home_dir}/.local/share/opencode"
+            fi
+        fi
+    fi
+}
+
 # serve/web/acp default to --hostname 127.0.0.1 (loopback only), which is
 # unreachable from the host through a published port. In a container we want
 # the server bound to all interfaces so `docker run -p` reaches it out of the
@@ -95,6 +112,7 @@ if [ "$(id -u)" = "0" ]; then
             fi
 
             ensure_config_dir
+            ensure_data_dir
         elif [ "${owner_uid}" = "0" ]; then
             log "mounted workspace is owned by root; uid/gid adaptation skipped"
         fi
