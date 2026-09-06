@@ -23,7 +23,7 @@ RUN apk add --no-cache \
 # what's actually installed.
 # Override both --build-arg OPENCODE_VERSION and --build-arg VERSION together
 # to bump or to pin a different release.
-ARG OPENCODE_VERSION=1.18.23
+ARG OPENCODE_VERSION=1.18.29
 
 # Official install command; drops the binary at $HOME/.opencode/bin/opencode.
 # HOME is pinned explicitly: the base image config sets no HOME, so the install
@@ -39,7 +39,7 @@ FROM cgr.dev/chainguard/wolfi-base:latest@sha256:a31344ab2cb8618db84f535eec56f76
 # OPENCODE_VERSION above so a plain `docker build -f opencode/opencode.Dockerfile .`
 # produces an accurate label without extra args; keep the two in sync when bumping.
 ARG REVISION=unknown
-ARG VERSION=1.18.23
+ARG VERSION=1.18.29
 LABEL org.opencontainers.image.title="OpenCode" \
       org.opencontainers.image.description="AI coding agent for the terminal, installed via the official installer." \
       org.opencontainers.image.authors="Petromir Dzhunev" \

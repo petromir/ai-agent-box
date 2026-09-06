@@ -24,7 +24,7 @@ RUN apk add --no-cache \
 # GitHub-release binary path (--ref alone would switch it to a from-source
 # install via bun). Override both --build-arg OMP_VERSION and --build-arg
 # VERSION together to bump or to pin a different release.
-ARG OMP_VERSION=v18.0.10
+ARG OMP_VERSION=v18.1.11
 
 # Official install command; drops the binary at $HOME/.local/bin/omp. The
 # installer smoke-tests `omp --version` after download and fails the build if
@@ -42,7 +42,7 @@ FROM cgr.dev/chainguard/wolfi-base:latest@sha256:a31344ab2cb8618db84f535eec56f76
 # OMP_VERSION above so a plain build produces an accurate label without extra
 # args; keep the two in sync when bumping.
 ARG REVISION=unknown
-ARG VERSION=v18.0.10
+ARG VERSION=v18.1.11
 LABEL org.opencontainers.image.title="omp (Oh-My-Pi)" \
       org.opencontainers.image.description="AI coding agent with the IDE wired in, installed via the official installer." \
       org.opencontainers.image.authors="Petromir Dzhunev" \
@@ -85,10 +85,10 @@ RUN apk add --no-cache \
     diffutils=${DIFFUTILS_VERSION}
 
 # UID/GID above 10,000 avoids overlapping with privileged host users.
-# omp persists config and sessions under $HOME (~/.omp), so the user needs a home directory.
+# omp persists config and sessions under $HOME (~/.omp/agent), so the user needs a home directory.
 RUN addgroup -g 10001 -S omp && \
     adduser -u 10001 -S -G omp -h /home/ai-agent-box omp && \
-    mkdir -p /workspace /home/ai-agent-box/.omp && \
+    mkdir -p /workspace /home/ai-agent-box/.omp/agent && \
     chown -R omp:omp /workspace /home/ai-agent-box/.omp
 
 # Adapts uid/gid to a bind-mounted /workspace owned by a host user (native Linux),

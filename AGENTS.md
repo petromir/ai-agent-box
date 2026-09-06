@@ -23,7 +23,9 @@ almost always to the opencode/opencode.Dockerfile or entrypoint script.
 ## Verify every change
 
 Any opencode/opencode.Dockerfile or entrypoint change MUST be verified by actually building and
-running the image — not just by reading the diff:
+running the image — not just by reading the diff. `tests/run-tests.sh` automates
+all checks below (`--skip-build` reuses built images, `--only opencode,omp,java`
+runs a subset); prefer it over running the commands by hand:
 
 ```bash
 docker build -f opencode/opencode.Dockerfile -t ai-agent-box:local .
@@ -63,7 +65,7 @@ docker run --rm ai-agent-box:omp-local --version   # omp/<version>
 # 2. Root/uid-adaptation path: same foreign-uid setup as above, then:
 docker run --rm --user 0 -v /path/to/repo:/workspace ai-agent-box:omp-local --version
 # and confirm "adapting uid/gid..." appears on stderr and the adapted user
-# can write to ~/.omp (e.g. `touch` a file there as the user).
+# can write to ~/.omp and ~/.omp/agent (e.g. `touch` a file there as the user).
 ```
 
 Watch for silent regressions in:
@@ -95,10 +97,10 @@ Watch for silent regressions in:
   same as `OPENCODE_VERSION`/`VERSION` above.
 - **omp has no serve mode** — never add `--hostname` injection or `EXPOSE` to
   the omp variant; injecting a flag into `omp acp` breaks the stdio protocol.
-- **omp home ownership** — the omp image pre-creates `~/.omp` owned by uid
-  10001; after uid adaptation `omp/omp-entrypoint.sh` must chown it
-  (non-recursively) and NEVER when it is a bind mount — same rule as the
-  opencode dirs above.
+- **omp home ownership** — the omp image pre-creates `~/.omp` and
+  `~/.omp/agent` owned by uid 10001; after uid adaptation
+  `omp/omp-entrypoint.sh` must chown both (non-recursively) and NEVER when
+  they are bind mounts — same rule as the opencode dirs above.
 - **TLS-intercepting build networks** — if `apk add`/`curl` fail in a `RUN`
   step with `certificate verify failed`, that's a local/corporate proxy MITM
   issue, not a Dockerfile bug (confirm by checking `docker info` for a

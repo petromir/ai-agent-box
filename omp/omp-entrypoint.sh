@@ -30,20 +30,31 @@ is_mounted() {
     grep -qs " $1 " /proc/mounts
 }
 
-# Ensure ~/.omp exists (omp auto-creates it on first run, but we want it ready
-# and owned by the runtime user). omp keeps its config and sessions there
-# (~/.omp/agent/config.yml, models.yml, ...). Ownership is fixed
-# non-recursively and never touches bind-mounted host data.
+# Ensure ~/.omp/agent exists (omp auto-creates it on first run, but we want it
+# ready and owned by the runtime user). omp keeps its config and sessions there
+# (~/.omp/agent/config.yml, models.yml, ...). Ownership is fixed non-recursively
+# and never touches bind-mounted host data.
 ensure_config_dir() {
-    if [ ! -d "${home_dir}/.omp" ]; then
-        mkdir -p "${home_dir}/.omp"
-        log "created ${home_dir}/.omp"
+    # If ~/.omp is a bind mount we never write into it at all: creating or
+    # chowning ~/.omp/agent there would alter host file ownership (and, as
+    # root, leave a root-owned dir the adapted user cannot write to). omp
+    # creates ~/.omp/agent itself on first run under the mounted dir.
+    if is_mounted "${home_dir}/.omp"; then
+        return
+    fi
+    if [ ! -d "${home_dir}/.omp/agent" ]; then
+        mkdir -p "${home_dir}/.omp/agent"
+        log "created ${home_dir}/.omp/agent"
     fi
     # After uid adaptation the pre-created tree is still owned by the image's
-    # 10001; the adapted user cannot write to it. Skip bind mounts so host
-    # file ownership is never altered.
-    if [ "$(id -u)" = "0" ] && ! is_mounted "${home_dir}/.omp"; then
+    # 10001; the adapted user cannot write to it. Re-own both levels
+    # non-recursively, skipping ~/.omp/agent itself if it is its own bind mount
+    # (so that host file ownership is never altered).
+    if [ "$(id -u)" = "0" ]; then
         chown omp:omp "${home_dir}/.omp"
+        if ! is_mounted "${home_dir}/.omp/agent"; then
+            chown omp:omp "${home_dir}/.omp/agent"
+        fi
     fi
 }
 

@@ -25,7 +25,7 @@ docker build -f opencode/opencode.Dockerfile -t ai-agent-box:latest .
 
 # Pin a different OpenCode release (bump OPENCODE_VERSION and VERSION together
 # so the installed binary and the OCI version label stay in sync)
-docker build -f opencode/opencode.Dockerfile --build-arg OPENCODE_VERSION=1.18.23 --build-arg VERSION=1.18.23 -t ai-agent-box:1.18.23 .
+docker build -f opencode/opencode.Dockerfile --build-arg OPENCODE_VERSION=1.18.29 --build-arg VERSION=1.18.29 -t ai-agent-box:1.18.29 .
 
 # Pin a different version of a bundled tool (ripgrep, jq, yq, patch, diffutils)
 docker build -f opencode/opencode.Dockerfile --build-arg JQ_VERSION=1.8.2-r1 -t ai-agent-box:latest .
@@ -280,7 +280,7 @@ docker build -f omp/omp.Dockerfile -t ai-agent-box:omp .
 # Pin a different omp release (bump OMP_VERSION and VERSION together so the
 # installed binary and the OCI version label stay in sync)
 docker build -f omp/omp.Dockerfile \
-  --build-arg OMP_VERSION=v18.0.10 --build-arg VERSION=v18.0.10 \
+  --build-arg OMP_VERSION=v18.1.11 --build-arg VERSION=v18.1.11 \
   -t ai-agent-box:omp .
 
 # Interactive TUI
@@ -289,9 +289,13 @@ docker run -it --rm -v "$PWD:/workspace" ai-agent-box:omp
 # One-shot prompt
 docker run -it --rm -v "$PWD:/workspace" ai-agent-box:omp -p "explain this repo"
 
-# Persist config and sessions across containers
+# Persist config and sessions across containers (entire directory or agent subfolder)
 docker run -it --rm -v "$PWD:/workspace" \
   -v "$HOME/.omp:/home/ai-agent-box/.omp" ai-agent-box:omp
+
+# Or persist only the agent directory:
+# docker run -it --rm -v "$PWD:/workspace" \
+#   -v "$HOME/.omp/agent:/home/ai-agent-box/.omp/agent" ai-agent-box:omp
 ```
 
 Differences from the OpenCode image:
@@ -300,7 +304,7 @@ Differences from the OpenCode image:
 |----------|-----------|
 | Binary | `/usr/local/bin/omp` (root-owned, 0755, from the official installer) |
 | User | `omp`, uid/gid 10001 (root only at entry for uid adaptation) |
-| Config/data dir | `$HOME/.omp` (`/home/ai-agent-box/.omp`) — mount it to persist config and sessions |
+| Config/data dir | `$HOME/.omp` (`/home/ai-agent-box/.omp`) or `$HOME/.omp/agent` — mount to persist config and sessions |
 | Entry | `omp-entrypoint.sh` → `omp`; default `CMD ["--help"]` |
 | Server mode | none — omp's entry points are the TUI, one-shot `-p`, RPC, and ACP over stdio, so the image has no `EXPOSE` and the entrypoint injects no `--hostname` |
 
