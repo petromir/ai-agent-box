@@ -14,6 +14,14 @@ Linux userland instead — while still letting it work on your real repository
 through a bind mount, with files it creates owned by **you** on native Linux
 (not by a container uid).
 
+The image and entrypoint are built to be safe by default (non-root, no
+setuid binaries, no privilege-escalation path back to root). But containers
+are not a full sandbox out of the box: capabilities, the network namespace,
+and the root filesystem are only as locked down as the flags you pass to
+`docker run`. See [Hardening: keeping the agent scoped to
+`/workspace`](#hardening-keeping-the-agent-scoped-to-workspace) for the flags
+that close that gap.
+
 Prefer [omp](https://omp.sh) (Oh-My-Pi) over OpenCode? The same box is
 available as the [omp variant](#variant-omp-oh-my-pi).
 
@@ -123,14 +131,23 @@ docker run --rm -v "$PWD:/workspace" ai-agent-box:latest --version
 ### Server (`opencode serve`)
 
 Run OpenCode as a headless HTTP server (no TUI). The image auto-binds the
-server to `0.0.0.0` in serve mode so a published port reaches it — you don't
-need to pass `--hostname` yourself.
+server to `0.0.0.0` *inside the container* in serve mode so a published port
+reaches it — you don't need to pass `--hostname` yourself. The server is the
+agent's control plane: it can read/write everything under `/workspace` and
+run shell commands, so publish it to loopback only and always set a password.
 
 ```bash
-docker run --rm -d -p 4096:4096 -v "$PWD:/workspace" --name opencode-server ai-agent-box:latest serve
+docker run --rm -d -p 127.0.0.1:4096:4096 -v "$PWD:/workspace" \
+  -e OPENCODE_SERVER_PASSWORD="$(openssl rand -hex 24)" \
+  --name opencode-server ai-agent-box:latest serve
 ```
 
-- `-p 4096:4096` — publish the default serve port to the host
+- `-p 127.0.0.1:4096:4096` — publish the serve port to loopback **only**;
+  omitting the `127.0.0.1:` prefix (or using `-P`, since the image also
+  declares `EXPOSE 4096`) publishes on **all** host interfaces, reachable by
+  anyone on your LAN/VPN
+- `-e OPENCODE_SERVER_PASSWORD=...` — required; without it the server accepts
+  unauthenticated requests (see [Authentication](#authentication) below)
 - `-d` — detached (long-running server)
 - `-v "$PWD:/workspace"` — your repository (the server operates on it)
 
@@ -177,35 +194,47 @@ host through a published port; the image injects `--hostname 0.0.0.0` when you
 run `serve` without an explicit `--hostname`. Pass `--hostname 127.0.0.1` to
 restrict to loopback, or any other value to customize.
 
-Override port and restrict to loopback (only reachable via `docker exec` or
-`--network host`, since a loopback-bound server is not reachable through a
-published port):
+Override port and restrict to loopback *inside the container too* (only
+reachable via `docker exec`, since a loopback-bound server is not reachable
+through a published port at all):
 
 ```bash
 docker run --rm -d -v "$PWD:/workspace" --name oc-lb ai-agent-box:latest serve --port 4097 --hostname 127.0.0.1
 docker exec oc-lb curl -s http://localhost:4097/global/health
 ```
 
+> Do not reach for `--network host` to work around this instead — it removes
+> the container's network namespace entirely, so *every* service listening on
+> your host's loopback interface (databases, other dev servers, a
+> TCP-exposed Docker daemon) becomes directly reachable from inside the
+> container. `docker exec` (above) is the safe way to probe a
+> loopback-bound server from outside the container.
+
 Allow browser origins (CORS):
 
 ```bash
-docker run --rm -p 4096:4096 -v "$PWD:/workspace" \
+docker run --rm -p 127.0.0.1:4096:4096 -v "$PWD:/workspace" \
+  -e OPENCODE_SERVER_PASSWORD="$(openssl rand -hex 24)" \
   ai-agent-box:latest serve --cors http://localhost:5173 --cors https://app.example.com
 ```
 
 #### Authentication
 
-Protect the server with HTTP basic auth:
+Protect the server with HTTP basic auth — treat this as **required**, not
+optional, for any serve invocation, even one published to loopback only
+(anything else on your machine, or anyone with SSH access to it, can reach a
+loopback-bound port):
 
 ```bash
-docker run --rm -d -p 4096:4096 -v "$PWD:/workspace" \
-  -e OPENCODE_SERVER_PASSWORD=your-password \
+docker run --rm -d -p 127.0.0.1:4096:4096 -v "$PWD:/workspace" \
+  -e OPENCODE_SERVER_PASSWORD="$(openssl rand -hex 24)" \
   ai-agent-box:latest serve
 ```
 
 The username defaults to `opencode`; override with
 `-e OPENCODE_SERVER_USERNAME=custom`. Without a password, opencode logs
-`server is unsecured` on startup.
+`server is unsecured` on startup — treat that log line as a misconfiguration,
+not a warning to ignore.
 
 #### Persistence
 
@@ -213,18 +242,21 @@ Mount the auth/sessions directory so logins and sessions survive across
 containers:
 
 ```bash
-docker run --rm -d -p 4096:4096 -v "$PWD:/workspace" \
+docker run --rm -d -p 127.0.0.1:4096:4096 -v "$PWD:/workspace" \
   -v "$HOME/.local/share/opencode:/home/ai-agent-box/.local/share/opencode" \
+  -e OPENCODE_SERVER_PASSWORD="$(openssl rand -hex 24)" \
   ai-agent-box:latest serve
 ```
 
 On native Linux with a host uid other than `10001`, start as root so the
 entrypoint adapts the container identity to your repo (works the same in serve
-mode): `docker run --rm -d --user 0 -p 4096:4096 -v "$PWD:/workspace" ai-agent-box:latest serve`.
+mode): `docker run --rm -d --user 0 -p 127.0.0.1:4096:4096 -v "$PWD:/workspace" -e OPENCODE_SERVER_PASSWORD="$(openssl rand -hex 24)" ai-agent-box:latest serve`.
 
 > Note: mDNS discovery (`--mdns`) relies on host multicast and typically does
-> not function inside a container without `--network host`; the flags are
-> passed through but mDNS may be inactive.
+> not function inside a container without `--network host`. Given the
+> network-isolation trade-off `--network host` carries (see above), treat
+> `--mdns` as effectively unsupported in this image rather than reaching for
+> that flag to make it work.
 
 ### On native Linux (file ownership)
 
@@ -241,6 +273,132 @@ The entrypoint rewrites the runtime user's uid/gid to the mount owner, marks
 `/workspace` git-safe, then drops privileges before exec'ing OpenCode. On
 Docker Desktop (macOS/Windows) ownership is squashed and the default non-root
 invocation works as-is.
+
+## Hardening: keeping the agent scoped to `/workspace`
+
+The image is non-root, has no setuid binaries, and no way back to root once
+the entrypoint drops privileges — but a container is not a sandbox by
+itself. Capabilities, the network namespace, and the root filesystem are only
+as locked down as the flags you pass to `docker run`. The recipes below were
+verified against this image; adopt them as your default invocation rather
+than an occasional extra.
+
+### Threat model in one paragraph
+
+**Docker Desktop (macOS/Windows):** the container runs inside a lightweight
+VM; an escape reaches that VM, not your host filesystem, and bind-mount
+ownership is squashed so the default non-root user already works. **Native
+Linux:** the kernel is shared with your host, and (per [On native Linux (file
+ownership)](#on-native-linux-file-ownership)) the container may run
+briefly as real root — an escape there is categorically more severe. Prefer
+rootless Docker, `dockerd --userns-remap`, or Podman with
+`--userns=keep-id` if available: they keep the uid-mapping benefit of
+`--user 0` without ever giving the container process real host uid 0 or your
+real host-user uid on the shared kernel.
+
+### Recommended invocations
+
+Default (non-root) path — verified working:
+
+```bash
+docker run -it --rm \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges \
+  --pids-limit=512 --memory=4g --cpus=2 \
+  -v "$PWD:/workspace" \
+  ai-agent-box:latest
+```
+
+Add, if you don't need persisted sessions (verified working; omit the tmpfs
+on `$HOME` if you bind-mount `~/.local/share/opencode` for persistence
+instead, since that mount already gives you a writable, size-bounded path):
+
+```bash
+  --read-only \
+  --tmpfs /tmp:rw,nosuid,nodev \
+  --tmpfs /home/ai-agent-box:rw,nosuid,nodev,uid=10001,gid=10001
+```
+
+Native-Linux `--user 0` uid-adaptation path — this is the **exact minimal
+capability set**; dropping `CAP_CHOWN` breaks the entrypoint's `chown` calls,
+a plain `--cap-drop=ALL` fails at `setpriv`'s `setresuid` with a non-obvious
+error, and dropping `CAP_SETPCAP` breaks the entrypoint's own
+`setpriv --bounding-set -all` hardening step (that step needs `CAP_SETPCAP`
+to clear the *target* process's bounding set, even though the target ends up
+with none of these capabilities once it runs):
+
+```bash
+docker run -it --rm --user 0 \
+  --cap-drop=ALL --cap-add=CHOWN --cap-add=SETUID --cap-add=SETGID --cap-add=SETPCAP \
+  --security-opt=no-new-privileges \
+  --pids-limit=512 --memory=4g --cpus=2 \
+  -v "$PWD:/workspace" \
+  ai-agent-box:latest
+```
+
+`--read-only` is **not compatible** with `--user 0`: the entrypoint needs a
+writable `/etc` to rewrite `/etc/passwd`/`/etc/group` and record
+`git config --system safe.directory`. This is one more reason to prefer the
+rootless/userns approaches above over `--user 0` when they're available to
+you.
+
+### Never mount / never pass
+
+- **Never mount:** `/var/run/docker.sock` (equivalent to unrestricted host
+  root — see the note below if you actually need Docker-outside-of-Docker),
+  `/`, `$HOME` as a whole, `~/.ssh` as a whole, `~/.aws`, `~/.kube`,
+  `~/.docker`.
+- **Never pass:** `--privileged`, `--pid=host`, `--ipc=host`,
+  `--security-opt seccomp=unconfined`, `--cap-add=SYS_ADMIN`. Don't forward
+  `SSH_AUTH_SOCK` into the container either — it lets the agent authenticate
+  as you anywhere your agent forwarding reaches, with no key file to revoke.
+- **Do instead:** mount a single dedicated, revocable deploy key read-only
+  (`-v "$HOME/.ssh/id_agentbox:/home/ai-agent-box/.ssh/id_ed25519:ro"`), or
+  prefer an HTTPS token scoped to the one repo you're working on, passed with
+  `-e`. Mount the narrowest directory the task actually needs, and add `:ro`
+  to any mount the agent must not write to.
+- **`docker.sock` if you really need it:** `ensure_docker_access` in both
+  entrypoints supports the Docker-outside-of-Docker pattern (mount the host's
+  socket, the entrypoint grants the runtime user group access to it). Treat
+  that mount as equivalent to handing the agent root on the Docker host,
+  because it is — a container started through that socket can trivially
+  mount `/` and read/write anything. Only do this in a disposable VM, never
+  on a workstation with anything sensitive on it.
+
+### Network
+
+Verified: with default bridge networking the container can reach services
+bound to your host's loopback interface (e.g. via `host.docker.internal`),
+and the agent has unrestricted egress by default (it ships `curl`).
+"Access to the host" is not only the filesystem — an agent with unrestricted
+egress can also read cloud-metadata endpoints on a cloud VM, reach a
+TCP-exposed Docker daemon, or exfiltrate repository contents to any endpoint
+the model chooses to call.
+
+- Use a dedicated user-defined bridge network rather than the default one.
+- Use `--network=none` for anything that doesn't need model/API access (e.g.
+  `--version`, or local-model setups reachable only via a mounted socket).
+- For sensitive repositories, route egress through an allow-listing proxy
+  (`-e HTTPS_PROXY=...`) so only your model provider's endpoint is reachable.
+- Never pass `--network host` to work around a loopback-bound `serve` or
+  `--mdns` (see [Server](#server-opencode-serve)) — it removes the container's
+  network namespace entirely, making every host-loopback service directly
+  reachable from inside the container.
+
+### Filesystem and resource limits
+
+- `--read-only` plus the tmpfs mounts above prevents the agent from
+  persisting tooling or tampering with `/usr/local/bin/opencode` or `/etc`
+  between invocations. Rely on the default seccomp profile too — never pass
+  `--security-opt seccomp=unconfined` to work around a tool that seems to
+  need it; narrow the actual cause instead.
+- `--pids-limit`, `--memory`, and `--cpus` bound the blast radius of a
+  runaway build, an agent stuck in a retry loop, or a shell fork bomb the
+  agent's own tool-calling issues — none of which requires a container
+  escape to hurt your host.
+- A bind mount has no container-level disk quota: the agent can fill your
+  host disk by writing into `/workspace` or a persisted volume. Monitor free
+  space the same way you would for any other process writing to that path.
 
 ## Image details
 
@@ -381,6 +539,16 @@ Things to keep in mind:
 - **Expect the image to grow.** Toolchains like a JDK and Maven add real
   weight (often 300–500 MB combined); the "minimal" sizing in this README
   applies to the unmodified base image, not your derived one.
+- **Don't reintroduce a path back to root.** The base image deliberately
+  ships no setuid/setgid binaries and no `sudo`/`su`/`doas`, so once the
+  entrypoint drops privileges via `setpriv` there is nothing in the image
+  that can regain root — reinforced by `--no-new-privs` on that `setpriv`
+  call (see [Hardening](#hardening-keeping-the-agent-scoped-to-workspace)).
+  Installing a package that ships a setuid binary or file capabilities (rare,
+  but some `apk add` packages do) as root in your derived `Dockerfile` can
+  reopen that path. Check what you installed:
+  `docker run --rm --entrypoint sh <your-image> -c "find / -xdev \( -perm -4000 -o -perm -2000 \) -type f 2>/dev/null"`
+  should print nothing.
 
 ### Worked example: `java/java.Dockerfile`
 
@@ -399,6 +567,10 @@ docker build -f opencode/opencode.Dockerfile -t ai-agent-box:local .
 docker build -f java/java.Dockerfile --build-arg BASE_IMAGE=ai-agent-box:local -t ai-agent-box:java .
 docker run --rm --entrypoint bash ai-agent-box:java -c 'java -version && mvnd --version && python3 --version'
 ```
+
+[`java/java.21.Dockerfile`](java/java.21.Dockerfile) is the same worked
+example pinned to the latest BellSoft Liberica JDK 21 (LTS) build instead of
+25; build it the same way with `-f java/java.21.Dockerfile`.
 
 ### Verifying a derived image
 

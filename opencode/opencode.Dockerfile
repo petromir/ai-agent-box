@@ -57,6 +57,7 @@ ARG JQ_VERSION=1.8.2-r1
 ARG YQ_VERSION=4.53.6-r1
 ARG PATCH_VERSION=2.8-r8
 ARG DIFFUTILS_VERSION=3.12-r6
+ARG DOCKER_CLI_VERSION=29.8.0-r0
 
 # Runtime dependencies: bash/curl for the commands the agent runs, git for
 # repository awareness, openssh-client for git over SSH, setpriv for dropping
@@ -66,6 +67,13 @@ ARG DIFFUTILS_VERSION=3.12-r6
 # instead of BusyBox grep; jq/yq give the agent single-call JSON and YAML
 # querying/validation instead of dumping whole payloads into context; patch/
 # diffutils let it apply unified diffs directly (patch has no BusyBox applet).
+# docker-cli is the client binary only (no dockerd — that would need
+# privileged mode and contradicts "keep the image minimal"): the agent talks
+# to the host's or Docker Desktop's daemon over a bind-mounted
+# /var/run/docker.sock ("Docker-outside-of-Docker"); see README for the
+# `-v /var/run/docker.sock:/var/run/docker.sock` usage and the
+# opencode-entrypoint.sh group-membership wiring that grants the runtime user
+# access to it.
 RUN --mount=type=secret,id=external_ca,required=false \
     if [ -s /run/secrets/external_ca ]; then \
       cat /run/secrets/external_ca >> /etc/ssl/certs/ca-certificates.crt; \
@@ -80,7 +88,8 @@ RUN apk add --no-cache \
     jq=${JQ_VERSION} \
     yq=${YQ_VERSION} \
     patch=${PATCH_VERSION} \
-    diffutils=${DIFFUTILS_VERSION}
+    diffutils=${DIFFUTILS_VERSION} \
+    docker-cli=${DOCKER_CLI_VERSION}
 
 # UID/GID above 10,000 avoids overlapping with privileged host users.
 # OpenCode persists config and sessions under $HOME, so the user needs a home directory.

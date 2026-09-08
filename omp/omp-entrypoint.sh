@@ -23,6 +23,7 @@ set -euo pipefail
 
 readonly mount_dir=/workspace
 readonly home_dir=/home/ai-agent-box
+readonly docker_sock=/var/run/docker.sock
 
 log() { printf 'entrypoint: %s\n' "$*" >&2; }
 
@@ -58,6 +59,30 @@ ensure_config_dir() {
     fi
 }
 
+# Grants the runtime user access to a docker socket bind-mounted at
+# /var/run/docker.sock (the "Docker-outside-of-Docker" pattern: this image
+# ships only the docker CLI, no dockerd, so agent-issued `docker` commands
+# reach the host's or Docker Desktop's daemon through the mounted socket).
+# Access to the socket is gated by group membership, not uid, so we make omp
+# a supplementary member of the socket's owning group — the `--init-groups`
+# on the setpriv exec below then picks it up automatically. Requires root
+# (writing group membership needs /etc/group write access, same constraint
+# as the uid/gid adaptation above); a no-op otherwise, and a no-op if no
+# socket is mounted.
+ensure_docker_access() {
+    if [ ! -S "${docker_sock}" ]; then
+        return
+    fi
+    sock_gid=$(stat -c %g "${docker_sock}")
+    sock_group=$(awk -F: -v gid="${sock_gid}" '$3==gid{print $1; exit}' /etc/group)
+    if [ -z "${sock_group}" ]; then
+        sock_group=docker-host
+        addgroup -g "${sock_gid}" "${sock_group}"
+    fi
+    addgroup omp "${sock_group}"
+    log "granted omp access to ${docker_sock} via group ${sock_group} (gid ${sock_gid})"
+}
+
 if [ "$(id -u)" = "0" ]; then
     if [ -d "${mount_dir}" ]; then
         owner_uid=$(stat -c %u "${mount_dir}")
@@ -86,13 +111,25 @@ if [ "$(id -u)" = "0" ]; then
     fi
 
     # Trust the workspace for git regardless of who owns it, so the agent's
-    # git operations never fail on "dubious ownership".
-    git config --system --add safe.directory "${mount_dir}"
+    # git operations never fail on "dubious ownership". Non-fatal: a
+    # read-only /etc (e.g. --read-only without a writable overlay) would
+    # otherwise abort the whole container under `set -e` for a step that is
+    # only a convenience, not a correctness requirement.
+    git config --system --add safe.directory "${mount_dir}" \
+        || log "could not write /etc/gitconfig (read-only /etc?); continuing without it"
+
+    ensure_docker_access
 
     # setpriv execve's its target directly (no fork), so this replaces the
     # current process image in place: omp ends up running as PID 1 with
-    # no supervising process above it.
-    exec setpriv --reuid omp --regid omp --init-groups -- env HOME="${home_dir}" omp "$@"
+    # no supervising process above it. --bounding-set -all clears every
+    # capability from the bounding set (not just effective/permitted, which a
+    # plain uid drop already clears) and --no-new-privs prevents regaining
+    # privilege via setuid/file-capability binaries — defense in depth in
+    # case a derived image reintroduces one as root before this exec runs.
+    exec setpriv --reuid omp --regid omp --init-groups \
+        --bounding-set -all --no-new-privs \
+        -- env HOME="${home_dir}" omp "$@"
 fi
 
 # Non-root invocation: trust any workspace mounted at a well-known path.

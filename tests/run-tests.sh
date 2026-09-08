@@ -13,6 +13,11 @@
 #     - serve path: health endpoint reachable through the published port and
 #       reports the installed version; an explicit --hostname override binds
 #       loopback only (unreachable from the host)
+#     - hardening (README "Hardening: keeping the agent scoped to
+#       /workspace"): default path works with --cap-drop=ALL,
+#       --security-opt=no-new-privileges, and --read-only + tmpfs; the
+#       --user 0 path works with the documented minimal capability set
+#       (CHOWN, SETUID, SETGID, SETPCAP) plus no-new-privileges
 #   omp image (ai-agent-box:omp-local)
 #     - build
 #     - default (non-root) path: --version prints omp/<release>
@@ -20,11 +25,13 @@
 #     - mount safety: the entrypoint never creates or chowns anything inside a
 #       bind-mounted ~/.omp or ~/.omp/agent, and a non-root run with a mounted
 #       ~/.omp does not abort
+#     - hardening: same checks as the opencode image
 #   java image (ai-agent-box:java, derived from ai-agent-box:local)
 #     - build with BASE_IMAGE=ai-agent-box:local
 #     - default path: opencode --version plus java/mvnd/python3 toolchain
 #     - uid-adaptation path
 #     - serve path (health + hostname override)
+#     - hardening: same checks as the opencode image
 #
 # Docker Desktop (macOS) squashes bind-mount ownership, so the native-Linux
 # foreign-uid case is simulated deterministically: a derived "sim" image chowns
@@ -275,6 +282,41 @@ test_serve_override() {
     docker rm -f "$name" >/dev/null 2>&1
 }
 
+# --- hardening (README "Hardening: keeping the agent scoped to /workspace") -
+
+# test_hardened_default <image> <label>
+# Default non-root path with the README's recommended flags: all capabilities
+# dropped, no-new-privileges, and a read-only root filesystem backed by
+# tmpfs for /tmp and $HOME.
+test_hardened_default() {
+    local image=$1 label=$2 out rc
+    out=$(docker run --rm \
+        --cap-drop=ALL --security-opt=no-new-privileges \
+        --read-only --tmpfs /tmp:rw,nosuid,nodev \
+        --tmpfs /home/ai-agent-box:rw,nosuid,nodev,uid=10001,gid=10001 \
+        -v "$repo_root:/workspace:ro" \
+        "$image" --version 2>&1); rc=$?
+    assert_exit0 "$label: hardened default (cap-drop=ALL, read-only, no-new-privileges)" "$rc" "$out"
+}
+
+# test_hardened_adaptation <sim-image> <fake-script> <binary-path> <label>
+# --user 0 uid-adaptation path with the minimal capability set the README
+# documents: CHOWN (entrypoint chowns), SETUID+SETGID (setpriv's identity
+# switch), SETPCAP (setpriv's own --bounding-set -all hardening step, which
+# clears the bounding set on the *target* process and needs CAP_SETPCAP to do
+# so even though the target ends up with none of these capabilities).
+test_hardened_adaptation() {
+    local sim=$1 fake=$2 bin=$3 label=$4 out rc
+    out=$(docker run --rm --user 0 \
+        --cap-drop=ALL --cap-add=CHOWN --cap-add=SETUID --cap-add=SETGID --cap-add=SETPCAP \
+        --security-opt=no-new-privileges \
+        -v "$fake:$bin:ro" \
+        "$sim" --version 2>&1); rc=$?
+    assert_exit0 "$label: hardened adaptation (minimal caps, no-new-privileges)" "$rc" "$out"
+    assert_contains "$label: hardened adaptation message" "$out" "adapting uid/gid to mounted workspace owner 999:999"
+    assert_contains "$label: hardened adapted identity" "$out" "probe uid=999 gid=999"
+}
+
 # --- opencode ---------------------------------------------------------------
 
 test_opencode_default() {
@@ -439,6 +481,8 @@ if want opencode; then
         test_opencode_adaptation
         test_serve "$oc_image" opencode "$oc_serve_port" "$oc_ver"
         test_serve_override "$oc_image" opencode "$oc_override_port"
+        test_hardened_default "$oc_image" opencode
+        test_hardened_adaptation "sim-oc:$run_id" "$work_dir/fake-write-opencode.sh" /usr/local/bin/opencode opencode
     else
         bad "opencode: image present" "$oc_image not found (build failed, or run without --skip-build)"
     fi
@@ -454,6 +498,8 @@ if want omp; then
         test_omp_mounted_home
         test_omp_mounted_agent
         test_omp_nonroot_mounted_home
+        test_hardened_default "$omp_image" omp
+        test_hardened_adaptation "sim-omp:$run_id" "$work_dir/fake-write-omp.sh" /usr/local/bin/omp omp
     else
         bad "omp: image present" "$omp_image not found (build failed, or run without --skip-build)"
     fi
@@ -470,6 +516,8 @@ if want java; then
         test_java_adaptation
         test_serve "$java_image" java "$java_serve_port" "$java_ver"
         test_serve_override "$java_image" java "$java_override_port"
+        test_hardened_default "$java_image" java
+        test_hardened_adaptation "sim-java:$run_id" "$work_dir/fake-write-opencode.sh" /usr/local/bin/opencode java
     else
         bad "java: image present" "$java_image not found (build failed, or run without --skip-build)"
     fi
