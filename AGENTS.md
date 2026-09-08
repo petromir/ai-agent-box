@@ -50,6 +50,17 @@ docker rm -f opencode-server   # opencode serve ignores SIGTERM/SIGINT; rm -f fo
 docker run --rm -d -p 4097:4097 --name oc-lb ai-agent-box:local serve --port 4097 --hostname 127.0.0.1
 curl -s --max-time 3 http://localhost:4097/global/health || echo unreachable-as-expected
 docker rm -f oc-lb
+
+# 4. Arbitrary-uid path (recommended over --user 0; see
+#    PLAN-arbitrary-uid-home-layout.md and README "On native Linux"): an
+#    arbitrary uid with gid 0 can write the home tree and use git with NO
+#    uid/gid rewrite and NO root at any point.
+docker run --rm --user 999:0 ai-agent-box:local --version
+# same uid WITHOUT gid 0 in any form must NOT be able to write:
+docker run --rm --user 999:999 --entrypoint sh ai-agent-box:local \
+  -c 'touch "$HOME/.config/opencode/.probe" && echo OK || echo FAIL-as-expected'
+# the zero-`--user` default must stay byte-for-byte unchanged (uid=10001 gid=10001):
+docker run --rm --entrypoint sh ai-agent-box:local -c 'id -u; id -g'
 ```
 
 The omp variant carries the same obligation (there is no serve check — omp has
@@ -66,6 +77,12 @@ docker run --rm ai-agent-box:omp-local --version   # omp/<version>
 docker run --rm --user 0 -v /path/to/repo:/workspace ai-agent-box:omp-local --version
 # and confirm "adapting uid/gid..." appears on stderr and the adapted user
 # can write to ~/.omp and ~/.omp/agent (e.g. `touch` a file there as the user).
+
+# 3. Arbitrary-uid path (same rationale as opencode above):
+docker run --rm --user 999:0 ai-agent-box:omp-local --version
+docker run --rm --user 999:999 --entrypoint sh ai-agent-box:omp-local \
+  -c 'touch "$HOME/.omp/.probe" && echo OK || echo FAIL-as-expected'
+docker run --rm --entrypoint sh ai-agent-box:omp-local -c 'id -u; id -g'
 ```
 
 Watch for silent regressions in:
@@ -85,11 +102,33 @@ Watch for silent regressions in:
   is deterministic.
 - **Home/config ownership** — the runtime home is `/home/ai-agent-box`
   (keep `adduser -h`, `mkdir`/`chown`, `ENV HOME` in the opencode/opencode.Dockerfile and
-  `home_dir` in the entrypoint in sync). The image pre-creates
-  `~/.config/opencode` and `~/.local/share/opencode` owned by uid 10001;
-  after uid adaptation the entrypoint must chown both (non-recursively) or
-  the adapted user cannot write config/sessions — but must NEVER chown them
-  when they are bind mounts, to avoid altering host file ownership.
+  `home_dir` in the entrypoint in sync). The image owns the whole `$HOME`
+  tree (and `/workspace`) as `<user>:0` with `chmod g=u` + setgid directories
+  (the "arbitrary-uid" pattern — see PLAN-arbitrary-uid-home-layout.md): this
+  must cover *all* of `$HOME`, not just `.config`/`.local`, since the agent
+  creates other dot-dirs on demand (e.g. `~/.cache`) that must be creatable
+  by an arbitrary uid too. After `--user 0` uid adaptation the entrypoint
+  must still chown `.config`/`.local` (non-recursively) for the legacy path —
+  but must NEVER chown them when they are bind mounts, to avoid altering
+  host file ownership.
+- **The zero-`--user` default must stay byte-for-byte unchanged** — always
+  uid=10001 gid=10001, home tree writable via direct ownership, not via the
+  gid-0 mechanism. Any change to the Dockerfile's ownership/permission step
+  or the entrypoint must re-verify this (see "Verify every change" #4 above).
+- **`/etc/passwd`/`/etc/group` are group-writable by design** (`chmod g=u`,
+  both Dockerfiles), paired with `ensure_passwd_entry` in both entrypoints:
+  an arbitrary uid with no built-in passwd entry breaks `ssh`/`whoami`
+  otherwise (openssh-client refuses to run as an unrecognized uid). The
+  append step is non-fatal (logs and continues) so a read-only `/etc` (e.g.
+  `--read-only` without a writable overlay) degrades gracefully instead of
+  aborting the container.
+- **`git config --system --add safe.directory '*'` is baked at build time**
+  in both Dockerfiles — this is what lets the non-root/arbitrary-uid path
+  skip any runtime git config entirely. Keep the `'*'` scope (not narrowed to
+  `/workspace`) so nested repos under `/workspace` are covered too; the
+  legacy `--user 0` root branch still additionally runs a runtime
+  `git config --system --add safe.directory "${mount_dir}"` for defense in
+  depth — harmless duplication, not a bug.
 - **omp installer flags** — `omp/omp.Dockerfile` pins the release via
   `sh -s -- --binary --ref ${OMP_VERSION}`; `--ref` WITHOUT `--binary`
   switches the installer to a from-source install via bun (slow,
@@ -97,10 +136,11 @@ Watch for silent regressions in:
   same as `OPENCODE_VERSION`/`VERSION` above.
 - **omp has no serve mode** — never add `--hostname` injection or `EXPOSE` to
   the omp variant; injecting a flag into `omp acp` breaks the stdio protocol.
-- **omp home ownership** — the omp image pre-creates `~/.omp` and
-  `~/.omp/agent` owned by uid 10001; after uid adaptation
-  `omp/omp-entrypoint.sh` must chown both (non-recursively) and NEVER when
-  they are bind mounts — same rule as the opencode dirs above.
+- **omp home ownership** — the omp image owns `~/.omp` and `~/.omp/agent` as
+  `omp:0` with `chmod g=u` + setgid directories, the same arbitrary-uid
+  pattern as the opencode dirs above. After `--user 0` uid adaptation
+  `omp/omp-entrypoint.sh` must still chown both (non-recursively) for the
+  legacy path, and NEVER when they are bind mounts.
 - **TLS-intercepting build networks** — if `apk add`/`curl` fail in a `RUN`
   step with `certificate verify failed`, that's a local/corporate proxy MITM
   issue, not a Dockerfile bug (confirm by checking `docker info` for a
@@ -116,8 +156,12 @@ Watch for silent regressions in:
 
 - Keep the image minimal: every added package needs a runtime justification.
   Build-time-only tooling belongs in the builder stage only.
-- Never run the final container as root unless the user explicitly passes
-  `--user 0` (needed only for uid adaptation on native Linux).
+- Never run the final container as root. Native-Linux users with a foreign
+  host uid should prefer `--user "$(id -u):$(id -g)" --group-add 0` (the
+  arbitrary-uid recipe — no root involved at all); `--user 0` still works as
+  a legacy fallback (briefly root, only for the entrypoint's own uid/gid
+  rewrite) but is no longer the recommended path — see README "On native
+  Linux (file ownership)".
 - No secrets in the image or in `ENV`/`ARG` — credentials are mounted or
   passed at `docker run` time.
 - OCI label args (`VERSION`, `REVISION`) are for automation; do not hardcode
@@ -152,8 +196,10 @@ supported when changing the runtime stage:
   adding tools must not break the base entrypoint's uid-adaptation or serve
   hostname-injection behavior.
 - Anything a derived Dockerfile adds under `/home/ai-agent-box` must be
-  `chown`ed to `opencode:opencode` (uid/gid 10001), matching this repo's
-  own pattern, or the runtime user won't be able to write to it.
+  `chown`ed to `opencode:0` with `chmod g=u` (matching this repo's own
+  arbitrary-uid pattern — see "Home/config ownership" above), not
+  `opencode:opencode`, or the arbitrary-uid recipe can't write it even
+  though the default uid-10001 user still can.
 - This is a documentation/consumer-workflow concern, not a code change here;
   keep the "Using this image as a base" section in README.md in sync if the
   final `USER`, `HOME`, or package-manager story in the

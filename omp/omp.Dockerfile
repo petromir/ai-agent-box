@@ -95,10 +95,39 @@ RUN apk add --no-cache \
 
 # UID/GID above 10,000 avoids overlapping with privileged host users.
 # omp persists config and sessions under $HOME (~/.omp/agent), so the user needs a home directory.
+#
+# Ownership follows the "arbitrary uid" pattern (the OpenShift/Kubernetes
+# convention): gid 0 owns the tree and group permission bits mirror the
+# owner's (chmod g=u), so ANY uid carrying gid 0 — as its primary group or as
+# a supplementary one, e.g. `docker run --user 1000:1000 --group-add 0` — can
+# read/write it, with no root required inside the container at any point.
+# `chmod g+s` on directories re-applies the setgid bit (which `chmod -R g=u`
+# otherwise clears) so new subdirectories keep inheriting gid 0. The user's
+# own primary group stays `omp` (gid 10001), so the zero-`--user` default is
+# unaffected — only the *directory* group ownership changes.
 RUN addgroup -g 10001 -S omp && \
     adduser -u 10001 -S -G omp -h /home/ai-agent-box omp && \
     mkdir -p /workspace /home/ai-agent-box/.omp/agent && \
-    chown -R omp:omp /workspace /home/ai-agent-box/.omp
+    chown -R omp:0 /workspace /home/ai-agent-box/.omp && \
+    chmod -R g=u /workspace /home/ai-agent-box/.omp && \
+    find /workspace /home/ai-agent-box/.omp -type d -exec chmod g+s {} +
+
+# Bakes git's trust for any workspace this container ever operates on — the
+# whole point of this image is running against foreign-owned bind mounts —
+# so an arbitrary-uid run needs no runtime `git config` at all. `'*'` (not
+# just /workspace) also covers nested repos under /workspace, which the
+# legacy --user 0 path's runtime-only equivalent (see omp-entrypoint.sh)
+# does not.
+RUN git config --system --add safe.directory '*'
+
+# Lets the entrypoint self-heal /etc/passwd for an arbitrary, otherwise-
+# unrecognized uid (see ensure_passwd_entry in omp-entrypoint.sh): openssh-
+# client refuses to run as a uid it cannot look up, which would otherwise
+# break git-over-SSH under the arbitrary-uid pattern above. Safe: the image
+# ships no setuid/setgid binaries and no sudo/su/doas (see README: "Using
+# this image as a base"), so group-write access to these two files alone
+# confers no privilege-escalation path.
+RUN chmod g=u /etc/passwd /etc/group
 
 # Adapts uid/gid to a bind-mounted /workspace owned by a host user (native Linux),
 # marks it git-safe, and execs omp as the final process. Reverts to plain

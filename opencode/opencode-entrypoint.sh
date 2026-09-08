@@ -85,6 +85,40 @@ ensure_docker_access() {
     log "granted opencode access to ${docker_sock} via group ${sock_group} (gid ${sock_gid})"
 }
 
+# Non-root counterpart to ensure_docker_access: without root we cannot write
+# /etc/group, so a mounted docker socket is not auto-wired on the
+# arbitrary-uid path. Advisory only (never fails the container) — names the
+# flag you must add yourself.
+advise_docker_socket_nonroot() {
+    if [ ! -S "${docker_sock}" ]; then
+        return
+    fi
+    sock_gid=$(stat -c %g "${docker_sock}")
+    case " $(id -G) " in
+        *" ${sock_gid} "*) return ;;
+    esac
+    log "docker socket mounted but gid ${sock_gid} is not in your groups; add --group-add ${sock_gid} to access it"
+}
+
+# Self-heals /etc/passwd for an arbitrary, otherwise-unrecognized uid (the
+# "arbitrary uid" pattern used by opencode.Dockerfile: gid 0 makes the home
+# tree writable for any uid, but adds no passwd entry for it — openssh-client
+# refuses to run as a uid it cannot look up, which would otherwise break
+# git-over-SSH). Requires /etc/passwd to be group-writable (baked into the
+# image); non-fatal if it isn't (e.g. --read-only without a writable /etc),
+# since only ssh needs this, not opencode itself.
+ensure_passwd_entry() {
+    if id -un >/dev/null 2>&1; then
+        return
+    fi
+    if printf 'opencode:x:%s:%s:opencode:%s:/bin/sh\n' "$(id -u)" "$(id -g)" "${home_dir}" \
+        2>/dev/null >> /etc/passwd; then
+        log "added a passwd entry for uid $(id -u) (needed for ssh/whoami)"
+    else
+        log "could not add a passwd entry for uid $(id -u) (read-only /etc?); ssh may not work"
+    fi
+}
+
 # serve/web/acp default to --hostname 127.0.0.1 (loopback only), which is
 # unreachable from the host through a published port. In a container we want
 # the server bound to all interfaces so `docker run -p` reaches it out of the
@@ -167,11 +201,15 @@ if [ "$(id -u)" = "0" ]; then
 fi
 
 # Non-root invocation: trust any workspace mounted at a well-known path.
+# git's dubious-ownership check is already satisfied by the build-time
+# `git config --system --add safe.directory '*'` (see opencode.Dockerfile),
+# so no runtime git config is needed here — unlike the legacy --user 0 path.
 if [ -d "${mount_dir}" ]; then
-    log "running without root; uid/gid adaptation skipped (see README: native Linux file ownership)"
-    git config --global --add safe.directory "${mount_dir}" || true
+    log "running without root; for a foreign-owned /workspace on native Linux, pass --user \"\$(id -u):\$(id -g)\" --group-add 0 (see README: On native Linux)"
 fi
 
+advise_docker_socket_nonroot
+ensure_passwd_entry
 ensure_config_dir
 
 exec opencode "$@"

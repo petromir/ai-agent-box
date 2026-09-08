@@ -93,12 +93,44 @@ RUN apk add --no-cache \
 
 # UID/GID above 10,000 avoids overlapping with privileged host users.
 # OpenCode persists config and sessions under $HOME, so the user needs a home directory.
+#
+# Ownership follows the "arbitrary uid" pattern (the OpenShift/Kubernetes
+# convention): gid 0 owns the tree and group permission bits mirror the
+# owner's (chmod g=u), so ANY uid carrying gid 0 — as its primary group or as
+# a supplementary one, e.g. `docker run --user 1000:1000 --group-add 0` — can
+# read/write it, with no root required inside the container at any point.
+# The whole $HOME tree is covered (not just .config/.local): OpenCode also
+# creates other dot-dirs on demand (e.g. ~/.cache), which must be creatable
+# directly under $HOME by an arbitrary uid. `chmod g+s` on directories
+# re-applies the setgid bit (which `chmod -R g=u` otherwise clears) so
+# directories OpenCode creates later at runtime also come out group-owned by
+# gid 0 automatically. The user's own primary group stays `opencode` (gid
+# 10001), so the zero-`--user` default is unaffected — only the *directory*
+# group ownership changes.
 RUN addgroup -g 10001 -S opencode && \
     adduser -u 10001 -S -G opencode -h /home/ai-agent-box opencode && \
     mkdir -p /workspace /home/ai-agent-box/.config/opencode \
              /home/ai-agent-box/.local/share/opencode && \
-    chown -R opencode:opencode /workspace /home/ai-agent-box/.config \
-                               /home/ai-agent-box/.local
+    chown -R opencode:0 /workspace /home/ai-agent-box && \
+    chmod -R g=u /workspace /home/ai-agent-box && \
+    find /workspace /home/ai-agent-box -type d -exec chmod g+s {} +
+
+# Bakes git's trust for any workspace this container ever operates on — the
+# whole point of this image is running against foreign-owned bind mounts —
+# so an arbitrary-uid run needs no runtime `git config` at all. `'*'` (not
+# just /workspace) also covers nested repos under /workspace, which the
+# legacy --user 0 path's runtime-only equivalent (see opencode-entrypoint.sh)
+# does not.
+RUN git config --system --add safe.directory '*'
+
+# Lets the entrypoint self-heal /etc/passwd for an arbitrary, otherwise-
+# unrecognized uid (see ensure_passwd_entry in opencode-entrypoint.sh):
+# openssh-client refuses to run as a uid it cannot look up, which would
+# otherwise break git-over-SSH under the arbitrary-uid pattern above. Safe:
+# the image ships no setuid/setgid binaries and no sudo/su/doas (see README:
+# "Using this image as a base"), so group-write access to these two files
+# alone confers no privilege-escalation path.
+RUN chmod g=u /etc/passwd /etc/group
 
 # Adapts uid/gid to a bind-mounted /workspace owned by a host user (native Linux),
 # marks it git-safe, and execs opencode as the final process. Reverts to plain

@@ -67,18 +67,25 @@ docker build -f opencode/opencode.Dockerfile --secret id=external_ca,src=/path/t
 
 ### Interactive TUI
 
-> On native Linux, if your host uid is not `10001`, add `--user 0` so the
-> entrypoint can adapt file ownership to your repo — see
-> [On native Linux (file ownership)](#on-native-linux-file-ownership).
+> On native Linux, if your host uid is not `10001`, add `--user
+> "$(id -u):$(id -g)" --group-add 0` so the agent can write its config/data
+> dirs with no root involved — see [On native Linux (file
+> ownership)](#on-native-linux-file-ownership).
 
 ```bash
 cd your-project
 docker run -it --rm \
+  --user "$(id -u):$(id -g)" --group-add 0 \
   -v "$PWD:/workspace" \
   -v "$HOME/.local/share/opencode:/home/ai-agent-box/.local/share/opencode" \
   ai-agent-box:latest
 ```
 
+- `--user "$(id -u):$(id -g)" --group-add 0` — native Linux only; matches
+  your host uid/gid exactly (files the agent creates come out owned by you)
+  while adding gid 0 as an extra group so the pre-baked config/data dirs are
+  writable. Omit this on macOS/Windows (Docker Desktop already squashes
+  bind-mount ownership) or if your host uid happens to be `10001`.
 - `-v "$PWD:/workspace"` — your repository, the agent's working directory
 - `-v "$HOME/.local/share/opencode:..."` — optional; persists sessions/auth
   across containers so you don't re-login on every run
@@ -248,9 +255,9 @@ docker run --rm -d -p 127.0.0.1:4096:4096 -v "$PWD:/workspace" \
   ai-agent-box:latest serve
 ```
 
-On native Linux with a host uid other than `10001`, start as root so the
-entrypoint adapts the container identity to your repo (works the same in serve
-mode): `docker run --rm -d --user 0 -p 127.0.0.1:4096:4096 -v "$PWD:/workspace" -e OPENCODE_SERVER_PASSWORD="$(openssl rand -hex 24)" ai-agent-box:latest serve`.
+On native Linux with a host uid other than `10001`, add
+`--user "$(id -u):$(id -g)" --group-add 0` (works the same in serve mode, no
+root involved): `docker run --rm -d --user "$(id -u):$(id -g)" --group-add 0 -p 127.0.0.1:4096:4096 -v "$PWD:/workspace" -e OPENCODE_SERVER_PASSWORD="$(openssl rand -hex 24)" ai-agent-box:latest serve`.
 
 > Note: mDNS discovery (`--mdns`) relies on host multicast and typically does
 > not function inside a container without `--network host`. Given the
@@ -261,18 +268,97 @@ mode): `docker run --rm -d --user 0 -p 127.0.0.1:4096:4096 -v "$PWD:/workspace" 
 ### On native Linux (file ownership)
 
 Bind mounts keep host uid/gid. If your host uid differs from the image's
-10001, files the agent creates would be owned by 10001 — and git would refuse
-the repo as "dubious ownership". Start the container as root and let the
-entrypoint match your identity automatically:
+`10001`, the agent needs to write its config/data dirs (and, for git, avoid
+"dubious ownership" on `/workspace`) as a uid it doesn't own by default.
+
+**Recommended: the arbitrary-uid recipe (no root, ever):**
+
+```bash
+docker run -it --rm \
+  --user "$(id -u):$(id -g)" --group-add 0 \
+  -v "$PWD:/workspace" \
+  ai-agent-box:latest
+```
+
+- `--user "$(id -u):$(id -g)"` — runs the container as your exact host uid
+  and gid, so files the agent creates in `/workspace` are owned by you, not
+  by a container-internal uid.
+- `--group-add 0` — adds gid `0` as an *extra* group (not your primary
+  group), which is all that's needed to write `~/.config/opencode` and
+  `~/.local/share/opencode` inside the container. See "Why gid 0?" below for
+  what this does and doesn't mean.
+- git's dubious-ownership check is a non-issue here: the image bakes
+  `git config --system --add safe.directory '*'` at build time, so it
+  trusts any workspace regardless of uid — no runtime step needed.
+- One-time setup, not a per-run burden: put the command in a shell alias
+  or function (`alias agent-box='docker run -it --rm --user "$(id -u):$(id -g)" --group-add 0 -v "$PWD:/workspace" ai-agent-box:latest'`),
+  or use the [Compose snippet](#compose-snippet) below.
+
+**Legacy alternative: `--user 0`.** Still supported, not removed, but no
+longer recommended for new setups — it briefly runs the container as real
+root so the entrypoint can rewrite its own uid/gid, whereas the recipe above
+never uses root at all:
 
 ```bash
 docker run -it --rm --user 0 -v "$PWD:/workspace" ai-agent-box:latest
 ```
 
 The entrypoint rewrites the runtime user's uid/gid to the mount owner, marks
-`/workspace` git-safe, then drops privileges before exec'ing OpenCode. On
-Docker Desktop (macOS/Windows) ownership is squashed and the default non-root
-invocation works as-is.
+`/workspace` git-safe, then drops privileges before exec'ing OpenCode.
+
+On Docker Desktop (macOS/Windows), ownership is squashed and the plain
+default invocation (no `--user` flag at all) already works as-is — none of
+the above is needed there.
+
+### Why gid `0`?
+
+If you're not familiar with Linux users/groups, here's the short version.
+Every file has a numeric owner (**uid**) and a numeric group (**gid**). The
+image can't predict which uid you'll run as, but it *can* pin one shared gid
+in advance: it makes `~/.config/opencode`, `~/.local/share/opencode`, and
+`$HOME` itself owned by group `0`, with group-write permission
+(`chmod g=u`). Linux then lets **any** uid that carries gid `0` — as its
+main group or as an extra one via `--group-add 0` — read and write those
+directories, no matter what its own uid is.
+
+```
+# without --group-add 0:
+$ docker run --user 1000:1000 ai-agent-box:latest run "..."
+EACCES: permission denied, mkdir '/home/ai-agent-box/.local/share/opencode/log'
+
+# with --group-add 0:
+$ docker run --user 1000:1000 --group-add 0 ai-agent-box:latest run "..."
+# works — id inside the container shows: uid=1000 gid=1000 groups=0(root),1000
+```
+
+Gid `0` happens to be called "root" on most Linux systems, which can sound
+alarming — but inside this container it confers **no special power**: there
+is no `sudo`, no setuid binary, nothing gid `0` can do beyond read/write the
+few directories the image explicitly made group-writable. It's just a
+convenient, always-present group number every container has, borrowed as a
+"anyone with this group can write here" signal — not an admin flag. If a
+security scanner in your environment flags `runAsGroup: 0`, use
+`--group-add 0` (gid 0 as a supplementary group) rather than `--user X:0`
+(gid 0 as your primary group) — both work identically for this image, and
+the former keeps your primary gid as whatever your policy expects.
+
+### Compose snippet
+
+```yaml
+services:
+  agent:
+    image: ai-agent-box:latest
+    user: "${UID:-1000}:${GID:-1000}"
+    group_add:
+      - "0"
+    volumes:
+      - .:/workspace
+    stdin_open: true
+    tty: true
+```
+
+Run with `UID=$(id -u) GID=$(id -g) docker compose run --rm agent` (Compose
+does not expand `$(id -u)` itself, so export it from the shell first).
 
 ## Hardening: keeping the agent scoped to `/workspace`
 
@@ -288,13 +374,15 @@ than an occasional extra.
 **Docker Desktop (macOS/Windows):** the container runs inside a lightweight
 VM; an escape reaches that VM, not your host filesystem, and bind-mount
 ownership is squashed so the default non-root user already works. **Native
-Linux:** the kernel is shared with your host, and (per [On native Linux (file
-ownership)](#on-native-linux-file-ownership)) the container may run
-briefly as real root — an escape there is categorically more severe. Prefer
-rootless Docker, `dockerd --userns-remap`, or Podman with
-`--userns=keep-id` if available: they keep the uid-mapping benefit of
-`--user 0` without ever giving the container process real host uid 0 or your
-real host-user uid on the shared kernel.
+Linux:** the kernel is shared with your host. Use the [arbitrary-uid
+recipe](#on-native-linux-file-ownership) (`--user "$(id -u):$(id -g)"
+--group-add 0`) rather than the legacy `--user 0`: it needs **no root and no
+capabilities at all** (verified working with `--cap-drop=ALL`), so there is
+no privileged window for an escape to land in, unlike `--user 0`, which
+briefly runs the container as real root. Rootless Docker, `dockerd
+--userns-remap`, or Podman with `--userns=keep-id` remain worth adopting on
+top of either recipe if available — they add a further layer by remapping
+container uids away from real host uids entirely.
 
 ### Recommended invocations
 
@@ -319,13 +407,37 @@ instead, since that mount already gives you a writable, size-bounded path):
   --tmpfs /home/ai-agent-box:rw,nosuid,nodev,uid=10001,gid=10001
 ```
 
-Native-Linux `--user 0` uid-adaptation path — this is the **exact minimal
-capability set**; dropping `CAP_CHOWN` breaks the entrypoint's `chown` calls,
-a plain `--cap-drop=ALL` fails at `setpriv`'s `setresuid` with a non-obvious
-error, and dropping `CAP_SETPCAP` breaks the entrypoint's own
-`setpriv --bounding-set -all` hardening step (that step needs `CAP_SETPCAP`
-to clear the *target* process's bounding set, even though the target ends up
-with none of these capabilities once it runs):
+Native-Linux arbitrary-uid path (see [On native Linux (file
+ownership)](#on-native-linux-file-ownership)) — this is the **recommended**
+native-Linux recipe; unlike `--user 0` below, it needs **zero capabilities**
+(verified working with `--cap-drop=ALL`) and is fully compatible with
+`--read-only`:
+
+```bash
+docker run -it --rm \
+  --user "$(id -u):$(id -g)" --group-add 0 \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges \
+  --read-only \
+  --tmpfs /tmp:rw,nosuid,nodev \
+  --tmpfs /home/ai-agent-box:rw,nosuid,nodev,uid=$(id -u),gid=0,mode=0770 \
+  --pids-limit=512 --memory=4g --cpus=2 \
+  -v "$PWD:/workspace" \
+  ai-agent-box:latest
+```
+
+(Omit the `--read-only`/`--tmpfs` lines if you don't need that level of
+hardening — the recipe works identically without them, just with a writable
+root filesystem.)
+
+Legacy `--user 0` path — kept for compatibility, no longer recommended (see
+[On native Linux (file ownership)](#on-native-linux-file-ownership)). This
+is the **exact minimal capability set**; dropping `CAP_CHOWN` breaks the
+entrypoint's `chown` calls, a plain `--cap-drop=ALL` fails at `setpriv`'s
+`setresuid` with a non-obvious error, and dropping `CAP_SETPCAP` breaks the
+entrypoint's own `setpriv --bounding-set -all` hardening step (that step
+needs `CAP_SETPCAP` to clear the *target* process's bounding set, even
+though the target ends up with none of these capabilities once it runs):
 
 ```bash
 docker run -it --rm --user 0 \
@@ -337,10 +449,8 @@ docker run -it --rm --user 0 \
 ```
 
 `--read-only` is **not compatible** with `--user 0`: the entrypoint needs a
-writable `/etc` to rewrite `/etc/passwd`/`/etc/group` and record
-`git config --system safe.directory`. This is one more reason to prefer the
-rootless/userns approaches above over `--user 0` when they're available to
-you.
+writable `/etc` to rewrite `/etc/passwd`/`/etc/group`. This is one more
+reason to prefer the arbitrary-uid recipe above when you can.
 
 ### Never mount / never pass
 
@@ -357,13 +467,24 @@ you.
   prefer an HTTPS token scoped to the one repo you're working on, passed with
   `-e`. Mount the narrowest directory the task actually needs, and add `:ro`
   to any mount the agent must not write to.
+- **git-over-SSH and an arbitrary uid:** `ssh` refuses to run as a uid it
+  cannot look up in `/etc/passwd` (e.g. `--user 999:0` with no such uid
+  baked into the image). The entrypoint self-heals this by appending a
+  passwd entry for the running uid on first use, so `ssh`/`whoami` work
+  normally — no action needed on your part. If you also pass `--read-only`
+  without a writable `/etc`, that self-heal can't run; either accept that
+  SSH-based git won't work in that combination, or bind-mount your host's
+  own passwd file read-only instead: `-v /etc/passwd:/etc/passwd:ro`.
 - **`docker.sock` if you really need it:** `ensure_docker_access` in both
-  entrypoints supports the Docker-outside-of-Docker pattern (mount the host's
-  socket, the entrypoint grants the runtime user group access to it). Treat
-  that mount as equivalent to handing the agent root on the Docker host,
-  because it is — a container started through that socket can trivially
-  mount `/` and read/write anything. Only do this in a disposable VM, never
-  on a workstation with anything sensitive on it.
+  entrypoints supports the Docker-outside-of-Docker pattern when running as
+  `--user 0` (mount the host's socket, the entrypoint grants the runtime
+  user group access to it automatically). On the recommended arbitrary-uid
+  path this auto-wiring needs root and doesn't run, so add the socket's own
+  group yourself: `--group-add "$(stat -c %g /var/run/docker.sock)"`. Either
+  way, treat that mount as equivalent to handing the agent root on the
+  Docker host, because it is — a container started through that socket can
+  trivially mount `/` and read/write anything. Only do this in a disposable
+  VM, never on a workstation with anything sensitive on it.
 
 ### Network
 
@@ -405,7 +526,7 @@ the model chooses to call.
 | Property | Value |
 |----------|-------|
 | Base | `cgr.dev/chainguard/wolfi-base` (digest-pinned) |
-| User | `opencode`, uid/gid 10001 (root only at entry for uid adaptation) |
+| User | `opencode`, uid/gid 10001 (arbitrary-uid capable via gid 0; root only needed for the legacy `--user 0` path) |
 | Binary | `/usr/local/bin/opencode` (root-owned, 0755, from the official installer) |
 | Data dirs | `$HOME=/home/ai-agent-box` (writable), `WORKDIR=/workspace` |
 | Size | ~251 MB (approximate; varies by opencode release) |
@@ -461,15 +582,15 @@ Differences from the OpenCode image:
 | Property | omp image |
 |----------|-----------|
 | Binary | `/usr/local/bin/omp` (root-owned, 0755, from the official installer) |
-| User | `omp`, uid/gid 10001 (root only at entry for uid adaptation) |
+| User | `omp`, uid/gid 10001 (arbitrary-uid capable via gid 0; root only needed for the legacy `--user 0` path) |
 | Config/data dir | `$HOME/.omp` (`/home/ai-agent-box/.omp`) or `$HOME/.omp/agent` — mount to persist config and sessions |
 | Entry | `omp-entrypoint.sh` → `omp`; default `CMD ["--help"]` |
 | Server mode | none — omp's entry points are the TUI, one-shot `-p`, RPC, and ACP over stdio, so the image has no `EXPOSE` and the entrypoint injects no `--hostname` |
 
-The uid/gid adaptation on native Linux works exactly as described in
-[On native Linux (file ownership)](#on-native-linux-file-ownership): start
-with `--user 0` and the entrypoint adapts to your repo's owner before
-exec'ing omp.
+On native Linux, use the arbitrary-uid recipe (`--user "$(id -u):$(id -g)"
+--group-add 0`) exactly as described in [On native Linux (file
+ownership)](#on-native-linux-file-ownership); the legacy `--user 0` path
+also still works unchanged.
 
 ## Using this image as a base
 
@@ -524,8 +645,14 @@ Things to keep in mind:
   different default behavior, leave them as-is so your derived image still
   runs OpenCode. Override `CMD` (or `ENTRYPOINT`) explicitly if you need to.
 - **Preserve ownership under `/home/ai-agent-box`.** Anything you `COPY` or
-  create there should be `chown`ed to `opencode:opencode` (uid/gid 10001), or
-  the runtime user won't be able to write to it.
+  create there should be group-owned by gid `0` with group permissions
+  mirroring the owner's — e.g. `COPY --chown=opencode:0 --chmod=775 ...`, or
+  a `RUN chown -R opencode:0 ... && chmod -R g=u ...` step — matching the
+  base image's own arbitrary-uid layout (see [Why gid
+  0?](#why-gid-0)). `--chown=opencode:opencode` (the pre-arbitrary-uid
+  pattern) still lets the default uid-10001 user write it, but breaks
+  writability for anyone using the recommended `--user "$(id -u):$(id -g)"
+  --group-add 0` recipe.
 - **Give build caches a writable home.** Maven (`.m2`), pip (`.cache/pip`),
   and Gradle (`.gradle`) all write under `$HOME` by default — which is
   `/home/ai-agent-box` and writable, so this works out of the box. To persist
@@ -583,9 +710,11 @@ docker run --rm my-agent-box --version          # OpenCode still runs
 docker run --rm my-agent-box run "run: java -version && mvn -version && python3 --version"
 ```
 
-The uid-adaptation (`--user 0`) and `serve` hostname injection described
-above work unchanged in derived images, since they live in the inherited
-entrypoint.
+The arbitrary-uid recipe, the legacy `--user 0` uid-adaptation path, and
+`serve` hostname injection described above all work unchanged in derived
+images, since they live in the inherited entrypoint — but see "Preserve
+ownership under `/home/ai-agent-box`" above if your derived Dockerfile adds
+anything under `$HOME`.
 
 ## API keys
 
@@ -598,11 +727,14 @@ volume (shown above) or pass keys per-run with `-e`:
 docker run -it --rm -v "$PWD:/workspace" -e ANTHROPIC_API_KEY ai-agent-box:latest
 ```
 
-Note: on native Linux with `--user 0`, the entrypoint adapts the container
-user to your host uid. If the persisted `opencode` data directory on the host
-was created by an earlier run with a different uid (e.g. the image's 10001),
-fix its ownership once with `sudo chown -R "$(id -u):$(id -g)" ~/.local/share/opencode`,
-or the agent will not be able to write sessions/auth.
+Note: on native Linux with the recommended `--user "$(id -u):$(id -g)"
+--group-add 0` recipe (or the legacy `--user 0`), the container writes
+session/auth files as your own uid, so a persisted directory you create
+yourself is already writable. The only case needing a fix is a directory an
+*earlier* run created under the plain default (uid `10001`, no `--user`
+flag) — fix its ownership once with
+`sudo chown -R "$(id -u):$(id -g)" ~/.local/share/opencode`, or the agent
+will not be able to write sessions/auth.
 
 ## License
 

@@ -7,9 +7,9 @@
 #   opencode image (ai-agent-box:local)
 #     - build
 #     - default (non-root) path: --version prints the release
-#     - root/uid-adaptation path: "adapting uid/gid..." message, adapted user
-#       can git-status /workspace and write ~/.config/opencode and
-#       ~/.local/share/opencode
+#     - root/uid-adaptation path (legacy --user 0): "adapting uid/gid..."
+#       message, adapted user can git-status /workspace and write
+#       ~/.config/opencode and ~/.local/share/opencode
 #     - serve path: health endpoint reachable through the published port and
 #       reports the installed version; an explicit --hostname override binds
 #       loopback only (unreachable from the host)
@@ -18,20 +18,32 @@
 #       --security-opt=no-new-privileges, and --read-only + tmpfs; the
 #       --user 0 path works with the documented minimal capability set
 #       (CHOWN, SETUID, SETGID, SETPCAP) plus no-new-privileges
+#     - arbitrary-uid path (PLAN-arbitrary-uid-home-layout.md): the zero-
+#       `--user` default stays uid=10001 gid=10001 (unchanged); an arbitrary
+#       uid with gid 0 (primary or via --group-add) can write the home tree
+#       and use git with NO uid/gid rewrite and NO root at any point; the
+#       same uid without gid 0 in any form cannot write (negative control);
+#       the recipe works with --cap-drop=ALL + --read-only (--user 0 cannot);
+#       ssh/whoami resolve the uid via the entrypoint's passwd self-heal
 #   omp image (ai-agent-box:omp-local)
 #     - build
 #     - default (non-root) path: --version prints omp/<release>
-#     - root/uid-adaptation path: same as above for ~/.omp and ~/.omp/agent
+#     - root/uid-adaptation path (legacy --user 0): same as above for
+#       ~/.omp and ~/.omp/agent
 #     - mount safety: the entrypoint never creates or chowns anything inside a
 #       bind-mounted ~/.omp or ~/.omp/agent, and a non-root run with a mounted
 #       ~/.omp does not abort
 #     - hardening: same checks as the opencode image
+#     - arbitrary-uid path: same checks as the opencode image, for
+#       ~/.omp and ~/.omp/agent
 #   java image (ai-agent-box:java, derived from ai-agent-box:local)
 #     - build with BASE_IMAGE=ai-agent-box:local
 #     - default path: opencode --version plus java/mvnd/python3 toolchain
-#     - uid-adaptation path
+#     - uid-adaptation path (legacy --user 0)
 #     - serve path (health + hostname override)
-#     - hardening: same checks as the opencode image
+#     - hardening: same checks as the opencode image (the arbitrary-uid path
+#       is not re-tested here — it lives entirely in the inherited base-image
+#       entrypoint/Dockerfile layout, already covered by the opencode checks)
 #
 # Docker Desktop (macOS) squashes bind-mount ownership, so the native-Linux
 # foreign-uid case is simulated deterministically: a derived "sim" image chowns
@@ -109,6 +121,14 @@ assert_contains() {
     esac
 }
 
+# assert_not_contains <test-name> <haystack> <needle>
+assert_not_contains() {
+    case "$2" in
+        *"$3"*) bad "$1" "expected NOT to find '$3' in: $(printf '%s' "$2" | head -c 400)" ;;
+        *) ok "$1" ;;
+    esac
+}
+
 assert_exit0() { # <test-name> <rc> <output>
     if [ "$2" -eq 0 ]; then
         ok "$1"
@@ -159,6 +179,16 @@ EOF
     cat > "$work_dir/fake-readonly.sh" <<'EOF'
 #!/bin/sh
 echo "probe uid=$(id -u) gid=$(id -g)"
+EOF
+
+    # Identity + ssh probe, used to assert the arbitrary-uid passwd self-heal
+    # (ensure_passwd_entry): whoami/ssh must resolve the running uid even
+    # when it has no built-in passwd entry.
+    cat > "$work_dir/fake-identity.sh" <<'EOF'
+#!/bin/sh
+echo "probe uid=$(id -u) gid=$(id -g)"
+echo "whoami=$(whoami 2>&1)"
+echo "ssh=$(ssh -V 2>&1)"
 EOF
 
     chmod +x "$work_dir"/fake-*.sh
@@ -315,6 +345,170 @@ test_hardened_adaptation() {
     assert_exit0 "$label: hardened adaptation (minimal caps, no-new-privileges)" "$rc" "$out"
     assert_contains "$label: hardened adaptation message" "$out" "adapting uid/gid to mounted workspace owner 999:999"
     assert_contains "$label: hardened adapted identity" "$out" "probe uid=999 gid=999"
+}
+
+# --- arbitrary-uid (PLAN-arbitrary-uid-home-layout.md) ----------------------
+#
+# These tests reuse the sim image already built by test_*_adaptation (its
+# /workspace is chowned to uid 999 — the same deterministic stand-in for a
+# native-Linux foreign-owned bind mount), but drive it via a caller-supplied
+# --user instead of --user 0, so no root is ever used in this section.
+
+# test_opencode_arbitrary_uid <sim-image>
+# --user 999:0 (gid 0 as the *primary* group): home tree writable, git happy,
+# and — unlike the --user 0 legacy path — no runtime uid/gid rewrite happens.
+test_opencode_arbitrary_uid() {
+    local sim=$1 out rc
+    out=$(docker run --rm --user 999:0 \
+        -v "$work_dir/fake-write-opencode.sh:/usr/local/bin/opencode:ro" \
+        "$sim" --version 2>&1); rc=$?
+    assert_exit0 "opencode: arbitrary-uid (999:0) exit code" "$rc" "$out"
+    assert_contains "opencode: arbitrary-uid identity" "$out" "probe uid=999 gid=0"
+    assert_contains "opencode: arbitrary-uid git works" "$out" "git-status OK"
+    assert_contains "opencode: arbitrary-uid config writable" "$out" "write-config OK"
+    assert_contains "opencode: arbitrary-uid data writable" "$out" "write-data OK"
+    assert_not_contains "opencode: arbitrary-uid runs no uid/gid rewrite" "$out" "adapting uid/gid"
+}
+
+# test_opencode_arbitrary_uid_supp_gid <sim-image>
+# The recommended recipe: gid 0 as a *supplementary* group, primary uid/gid
+# matching the caller exactly (reproduces the --user 0 legacy path's file-
+# ownership outcome with zero root).
+test_opencode_arbitrary_uid_supp_gid() {
+    local sim=$1 out rc
+    out=$(docker run --rm --user 999:999 --group-add 0 \
+        -v "$work_dir/fake-write-opencode.sh:/usr/local/bin/opencode:ro" \
+        "$sim" --version 2>&1); rc=$?
+    assert_exit0 "opencode: arbitrary-uid recommended recipe exit code" "$rc" "$out"
+    assert_contains "opencode: arbitrary-uid recommended recipe identity" "$out" "probe uid=999 gid=999"
+    assert_contains "opencode: arbitrary-uid recommended recipe config writable" "$out" "write-config OK"
+    assert_contains "opencode: arbitrary-uid recommended recipe data writable" "$out" "write-data OK"
+}
+
+# test_opencode_arbitrary_uid_negative <sim-image>
+# Guards against the home tree accidentally being world-writable: without
+# gid 0 in any form, an arbitrary uid must NOT be able to write it.
+test_opencode_arbitrary_uid_negative() {
+    local sim=$1 out rc
+    out=$(docker run --rm --user 999:999 \
+        -v "$work_dir/fake-write-opencode.sh:/usr/local/bin/opencode:ro" \
+        "$sim" --version 2>&1); rc=$?
+    assert_contains "opencode: arbitrary-uid without gid 0 cannot write config" "$out" "write-config FAIL"
+}
+
+# test_opencode_arbitrary_uid_hardened <sim-image>
+# The plan's headline security claim: the arbitrary-uid recipe works with
+# zero capabilities and a read-only root filesystem — --user 0 cannot do
+# this (see test_hardened_adaptation's minimal-capability-set requirement).
+test_opencode_arbitrary_uid_hardened() {
+    local sim=$1 out rc
+    out=$(docker run --rm \
+        --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+        --user 999:0 \
+        --tmpfs /tmp:rw,nosuid,nodev \
+        --tmpfs /home/ai-agent-box:rw,nosuid,nodev,uid=999,gid=0,mode=0770 \
+        -v "$work_dir/fake-write-opencode.sh:/usr/local/bin/opencode:ro" \
+        "$sim" --version 2>&1); rc=$?
+    assert_exit0 "opencode: arbitrary-uid hardened (no caps, read-only)" "$rc" "$out"
+    assert_contains "opencode: arbitrary-uid hardened config writable" "$out" "write-config OK"
+}
+
+# test_opencode_arbitrary_uid_ssh <sim-image>
+# ensure_passwd_entry must let ssh/whoami resolve an otherwise-unrecognized
+# uid; without it, openssh-client refuses to run at all.
+test_opencode_arbitrary_uid_ssh() {
+    local sim=$1 out rc
+    out=$(docker run --rm --user 999:0 \
+        -v "$work_dir/fake-identity.sh:/usr/local/bin/opencode:ro" \
+        "$sim" --version 2>&1); rc=$?
+    assert_exit0 "opencode: arbitrary-uid ssh probe exit code" "$rc" "$out"
+    assert_contains "opencode: arbitrary-uid ssh resolves uid" "$out" "ssh=OpenSSH_"
+}
+
+# test_opencode_default_identity <image>
+# The zero-`--user` default must stay byte-for-byte identical to before this
+# change: uid=10001 gid=10001, home tree fully writable via ownership, not
+# via the gid-0 mechanism.
+test_opencode_default_identity() {
+    local image=$1 out rc
+    out=$(docker run --rm \
+        -v "$work_dir/fake-write-opencode.sh:/usr/local/bin/opencode:ro" \
+        "$image" --version 2>&1); rc=$?
+    assert_exit0 "opencode: default identity exit code" "$rc" "$out"
+    assert_contains "opencode: default identity unchanged (10001:10001)" "$out" "probe uid=10001 gid=10001"
+    assert_contains "opencode: default identity config writable" "$out" "write-config OK"
+    assert_contains "opencode: default identity data writable" "$out" "write-data OK"
+}
+
+# test_omp_arbitrary_uid <sim-image>
+test_omp_arbitrary_uid() {
+    local sim=$1 out rc
+    out=$(docker run --rm --user 999:0 \
+        -v "$work_dir/fake-write-omp.sh:/usr/local/bin/omp:ro" \
+        "$sim" --version 2>&1); rc=$?
+    assert_exit0 "omp: arbitrary-uid (999:0) exit code" "$rc" "$out"
+    assert_contains "omp: arbitrary-uid identity" "$out" "probe uid=999 gid=0"
+    assert_contains "omp: arbitrary-uid git works" "$out" "git-status OK"
+    assert_contains "omp: arbitrary-uid home writable" "$out" "write-home OK"
+    assert_contains "omp: arbitrary-uid agent writable" "$out" "write-agent OK"
+    assert_not_contains "omp: arbitrary-uid runs no uid/gid rewrite" "$out" "adapting uid/gid"
+}
+
+# test_omp_arbitrary_uid_supp_gid <sim-image>
+test_omp_arbitrary_uid_supp_gid() {
+    local sim=$1 out rc
+    out=$(docker run --rm --user 999:999 --group-add 0 \
+        -v "$work_dir/fake-write-omp.sh:/usr/local/bin/omp:ro" \
+        "$sim" --version 2>&1); rc=$?
+    assert_exit0 "omp: arbitrary-uid recommended recipe exit code" "$rc" "$out"
+    assert_contains "omp: arbitrary-uid recommended recipe identity" "$out" "probe uid=999 gid=999"
+    assert_contains "omp: arbitrary-uid recommended recipe home writable" "$out" "write-home OK"
+    assert_contains "omp: arbitrary-uid recommended recipe agent writable" "$out" "write-agent OK"
+}
+
+# test_omp_arbitrary_uid_negative <sim-image>
+test_omp_arbitrary_uid_negative() {
+    local sim=$1 out rc
+    out=$(docker run --rm --user 999:999 \
+        -v "$work_dir/fake-write-omp.sh:/usr/local/bin/omp:ro" \
+        "$sim" --version 2>&1); rc=$?
+    assert_contains "omp: arbitrary-uid without gid 0 cannot write home" "$out" "write-home FAIL"
+}
+
+# test_omp_arbitrary_uid_hardened <sim-image>
+test_omp_arbitrary_uid_hardened() {
+    local sim=$1 out rc
+    out=$(docker run --rm \
+        --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+        --user 999:0 \
+        --tmpfs /tmp:rw,nosuid,nodev \
+        --tmpfs /home/ai-agent-box:rw,nosuid,nodev,uid=999,gid=0,mode=0770 \
+        -v "$work_dir/fake-write-omp.sh:/usr/local/bin/omp:ro" \
+        "$sim" --version 2>&1); rc=$?
+    assert_exit0 "omp: arbitrary-uid hardened (no caps, read-only)" "$rc" "$out"
+    assert_contains "omp: arbitrary-uid hardened home writable" "$out" "write-home OK"
+}
+
+# test_omp_arbitrary_uid_ssh <sim-image>
+test_omp_arbitrary_uid_ssh() {
+    local sim=$1 out rc
+    out=$(docker run --rm --user 999:0 \
+        -v "$work_dir/fake-identity.sh:/usr/local/bin/omp:ro" \
+        "$sim" --version 2>&1); rc=$?
+    assert_exit0 "omp: arbitrary-uid ssh probe exit code" "$rc" "$out"
+    assert_contains "omp: arbitrary-uid ssh resolves uid" "$out" "ssh=OpenSSH_"
+}
+
+# test_omp_default_identity <image>
+test_omp_default_identity() {
+    local image=$1 out rc
+    out=$(docker run --rm \
+        -v "$work_dir/fake-write-omp.sh:/usr/local/bin/omp:ro" \
+        "$image" --version 2>&1); rc=$?
+    assert_exit0 "omp: default identity exit code" "$rc" "$out"
+    assert_contains "omp: default identity unchanged (10001:10001)" "$out" "probe uid=10001 gid=10001"
+    assert_contains "omp: default identity home writable" "$out" "write-home OK"
+    assert_contains "omp: default identity agent writable" "$out" "write-agent OK"
 }
 
 # --- opencode ---------------------------------------------------------------
@@ -483,6 +677,12 @@ if want opencode; then
         test_serve_override "$oc_image" opencode "$oc_override_port"
         test_hardened_default "$oc_image" opencode
         test_hardened_adaptation "sim-oc:$run_id" "$work_dir/fake-write-opencode.sh" /usr/local/bin/opencode opencode
+        test_opencode_default_identity "$oc_image"
+        test_opencode_arbitrary_uid "sim-oc:$run_id"
+        test_opencode_arbitrary_uid_supp_gid "sim-oc:$run_id"
+        test_opencode_arbitrary_uid_negative "sim-oc:$run_id"
+        test_opencode_arbitrary_uid_hardened "sim-oc:$run_id"
+        test_opencode_arbitrary_uid_ssh "sim-oc:$run_id"
     else
         bad "opencode: image present" "$oc_image not found (build failed, or run without --skip-build)"
     fi
@@ -500,6 +700,12 @@ if want omp; then
         test_omp_nonroot_mounted_home
         test_hardened_default "$omp_image" omp
         test_hardened_adaptation "sim-omp:$run_id" "$work_dir/fake-write-omp.sh" /usr/local/bin/omp omp
+        test_omp_default_identity "$omp_image"
+        test_omp_arbitrary_uid "sim-omp:$run_id"
+        test_omp_arbitrary_uid_supp_gid "sim-omp:$run_id"
+        test_omp_arbitrary_uid_negative "sim-omp:$run_id"
+        test_omp_arbitrary_uid_hardened "sim-omp:$run_id"
+        test_omp_arbitrary_uid_ssh "sim-omp:$run_id"
     else
         bad "omp: image present" "$omp_image not found (build failed, or run without --skip-build)"
     fi
