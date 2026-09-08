@@ -677,9 +677,9 @@ Things to keep in mind:
   `docker run --rm --entrypoint sh <your-image> -c "find / -xdev \( -perm -4000 -o -perm -2000 \) -type f 2>/dev/null"`
   should print nothing.
 
-### Worked example: `java/java.Dockerfile`
+### Worked example: `java/java.25.Dockerfile`
 
-This repo ships [`java/java.Dockerfile`](java/java.Dockerfile) as a canonical derived
+This repo ships [`java/java.25.Dockerfile`](java/java.25.Dockerfile) as a canonical derived
 image: it layers BellSoft Liberica JDK 25, Maven Daemon (`mvnd`, which bundles
 Maven), and Python 3.13 on top of the base image. It demonstrates the pattern
 recommended above: pinned, checksum-verified tarball downloads installed
@@ -691,7 +691,7 @@ Build and verify:
 
 ```bash
 docker build -f opencode/opencode.Dockerfile -t ai-agent-box:local .
-docker build -f java/java.Dockerfile --build-arg BASE_IMAGE=ai-agent-box:local -t ai-agent-box:java .
+docker build -f java/java.25.Dockerfile --build-arg BASE_IMAGE=ai-agent-box:local -t ai-agent-box:java .
 docker run --rm --entrypoint bash ai-agent-box:java -c 'java -version && mvnd --version && python3 --version'
 ```
 

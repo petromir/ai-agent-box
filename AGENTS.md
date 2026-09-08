@@ -13,7 +13,7 @@ Wolfi container. It is intentionally tiny:
   mounts
 - `omp/omp.Dockerfile`, `omp/omp-entrypoint.sh` — parallel variant of the same
   box running the [omp](https://omp.sh) (Oh-My-Pi) agent instead of OpenCode
-- `java/java.Dockerfile` — worked example of a derived image (see "Extending
+- `java/java.25.Dockerfile` — worked example of a derived image (see "Extending
   this image as a base")
 - `README.md`, `LICENSE`, `.dockerignore` — docs and build hygiene
 
@@ -204,11 +204,11 @@ supported when changing the runtime stage:
   keep the "Using this image as a base" section in README.md in sync if the
   final `USER`, `HOME`, or package-manager story in the
   `opencode/opencode.Dockerfile` changes.
-- `java/java.Dockerfile` is the in-repo worked example of this pattern (Liberica
+- `java/java.25.Dockerfile` is the in-repo worked example of this pattern (Liberica
   JDK 25, mvnd, Python 3.13 via pinned, checksum-verified downloads — NOT
   SDKMAN, which is per-user and non-reproducible). Verify it after any base
   change: `docker build -f opencode/opencode.Dockerfile -t ai-agent-box:local . && docker build -f
-  java/java.Dockerfile --build-arg BASE_IMAGE=ai-agent-box:local -t ai-agent-box:java .`
+  java/java.25.Dockerfile --build-arg BASE_IMAGE=ai-agent-box:local -t ai-agent-box:java .`
   and run the same default/uid-adaptation/serve checks against
   `ai-agent-box:java`. When bumping its pinned tool versions, refresh the
   checksums: Liberica SHA1s via `api.bell-sw.com/v1/liberica/releases`

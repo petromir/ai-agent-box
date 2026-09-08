@@ -715,7 +715,7 @@ if want java; then
     if [ "$skip_build" -eq 0 ]; then
         # java derives from the opencode image; make sure the base exists.
         have_image "$oc_image" || build_image opencode opencode/opencode.Dockerfile "$oc_image"
-        build_image java java/java.Dockerfile "$java_image" --build-arg BASE_IMAGE="$oc_image"
+        build_image java java/java.25.Dockerfile "$java_image" --build-arg BASE_IMAGE="$oc_image"
     fi
     if have_image "$java_image"; then
         test_java_default

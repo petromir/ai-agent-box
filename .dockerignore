@@ -14,6 +14,6 @@ LICENSE
 # copied by the Dockerfiles — keep them)
 opencode/opencode.Dockerfile
 omp/omp.Dockerfile
-java/java.Dockerfile
+java/java.25.Dockerfile
 docker-compose*
 .dockerignore
