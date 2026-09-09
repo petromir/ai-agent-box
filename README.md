@@ -541,12 +541,22 @@ its own `--build-arg` (`RIPGREP_VERSION`, `JQ_VERSION`, `YQ_VERSION`,
 (`curl -fsSL https://opencode.ai/install | bash`) and copies only the binary
 into the final image — no install toolchain in the runtime layer.
 
+Also bundled: [`fff-mcp`](https://github.com/dmtrKovalenko/fff)
+(`/usr/local/bin/fff-mcp`, root-owned, 0755), a static MCP server binary for
+fast file search. Installed as a pinned, checksum-verified GitHub release
+download (`FFF_MCP_VERSION`, `FFF_MCP_SHA256_AMD64`/`FFF_MCP_SHA256_ARM64`)
+— deliberately not via the vendor's `curl | bash` installer, since that
+script is itself fetched unpinned and its checksum verification fails open
+in some fallback branches. Same reproducible, checksum-verified pattern as
+the Liberica JDK/mvnd installs in `java/java.25.Dockerfile`.
+
 ## Variant: omp (Oh-My-Pi)
 
 [`omp/omp.Dockerfile`](omp/omp.Dockerfile) builds the same hardened box around
 [omp](https://omp.sh) (Oh-My-Pi) instead of OpenCode — same digest-pinned
 Wolfi base, same non-root uid 10001 with bind-mount uid/gid adaptation, same
-bundled tooling. The agent is installed via the official installer
+bundled tooling (including `fff-mcp`, installed the same pinned,
+checksum-verified way). The agent is installed via the official installer
 (`curl -fsSL https://omp.sh/install | sh`), pinned to a known-good release
 (`OMP_VERSION`), and only the binary is copied into the final image.
 
@@ -741,6 +751,42 @@ yourself is already writable. The only case needing a fix is a directory an
 flag) — fix its ownership once with
 `sudo chown -R "$(id -u):$(id -g)" ~/.local/share/opencode`, or the agent
 will not be able to write sessions/auth.
+
+### Passing tokens and secrets for skills/tools
+
+Some skills or MCP tools need their own credentials at runtime — a
+`GITHUB_TOKEN`, a Jira/Confluence API token, a database password, etc. The
+same `-e` mechanism used for provider API keys above works for any secret
+env variable; you are not limited to model provider keys.
+
+Never source `~/.bashrc` (or any interactive shell rc file) into the
+container — it is not a portable `KEY=VALUE` list, and mixing secrets into
+shell startup files is fragile. Instead, pick one of:
+
+```bash
+# Forward a variable already exported in your shell (value stays in your
+# shell env, never typed twice, never leaks into container image layers)
+export GITHUB_TOKEN=ghp_xxx
+docker run -it --rm -v "$PWD:/workspace" -e GITHUB_TOKEN ai-agent-box:latest
+
+# Or collect several secrets into a plain env file (KEY=VALUE per line, no
+# quotes, no `export`, no shell logic) and pass it with --env-file
+cat > ~/.config/ai-agent-box/agent.env <<'EOF'
+GITHUB_TOKEN=ghp_xxx
+ATLASSIAN_PERSONAL_TOKEN=xxxx
+ATLASSIAN_EMAIL=you@example.com
+EOF
+chmod 600 ~/.config/ai-agent-box/agent.env
+
+docker run -it --rm -v "$PWD:/workspace" \
+  --env-file ~/.config/ai-agent-box/agent.env \
+  ai-agent-box:latest
+```
+
+Keep the env file out of version control and readable only by you
+(`chmod 600`). This matches the repo convention of never baking secrets into
+the image or its `ENV`/`ARG` — secrets are always supplied at `docker run`
+time, whether they are model provider keys or skill/tool tokens.
 
 ## License
 

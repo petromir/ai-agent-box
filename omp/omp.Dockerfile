@@ -35,6 +35,30 @@ ENV HOME=/root
 RUN set -o pipefail && \
     curl -fsSL https://omp.sh/install | sh -s -- --binary --ref ${OMP_VERSION}
 
+# fff-mcp (https://github.com/dmtrKovalenko/fff): a static MCP server binary.
+# Deliberately NOT installed via the vendor's `curl | bash` installer
+# (https://dmtrkovalenko.dev/install-fff-mcp.sh) — that script is itself
+# fetched unpinned from a mutable path and its own checksum verification
+# fails open (warns and continues) in some fallback branches. Instead: pinned
+# version + pinned per-architecture SHA256, downloaded directly from the
+# GitHub release and verified the same way as Liberica/mvnd in
+# java/java.25.Dockerfile — fail closed on unsupported arch or checksum
+# mismatch.
+ARG FFF_MCP_VERSION=v0.10.6
+ARG FFF_MCP_SHA256_AMD64=a44ef64015f1754aa63b690c24d9a748ed16298f05350da7b09554c4c98dfb0f
+ARG FFF_MCP_SHA256_ARM64=028b9e388716a8c0c39de3f153dd8e14e5ee998ffa70d4951f1cd2a3fc42f6ce
+RUN arch="$(uname -m)" && \
+    case "$arch" in \
+      x86_64)  target=x86_64-unknown-linux-musl; sha="$FFF_MCP_SHA256_AMD64" ;; \
+      aarch64) target=aarch64-unknown-linux-musl; sha="$FFF_MCP_SHA256_ARM64" ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac && \
+    if [ -z "$sha" ]; then echo "no fff-mcp SHA256 pinned for $arch; set FFF_MCP_SHA256_* for your arch" >&2; exit 1; fi && \
+    curl -fsSL -o /tmp/fff-mcp \
+      "https://github.com/dmtrKovalenko/fff/releases/download/${FFF_MCP_VERSION}/fff-mcp-${target}" && \
+    echo "${sha}  /tmp/fff-mcp" | sha256sum -c - && \
+    chmod +x /tmp/fff-mcp
+
 # --- Runtime stage: minimal image with a non-root user ---
 FROM cgr.dev/chainguard/wolfi-base:latest@sha256:a31344ab2cb8618db84f535eec56f76f6178b142cb92cb2e48676cc2dcebea72
 
@@ -136,6 +160,10 @@ COPY --chmod=755 omp/omp-entrypoint.sh /usr/local/bin/omp-entrypoint.sh
 
 # Install the binary system-wide from the build stage
 COPY --from=builder --chown=root:root --chmod=755 /root/.local/bin/omp /usr/local/bin/omp
+
+# fff-mcp: static system binary, root-owned, same placement convention as
+# omp above — not user state, so no arbitrary-uid ownership handling.
+COPY --from=builder --chown=root:root --chmod=755 /tmp/fff-mcp /usr/local/bin/fff-mcp
 
 # No EXPOSE: omp has no HTTP server mode — its entry points are the TUI,
 # one-shot `-p`, RPC, and ACP over stdio — so there is no port to document

@@ -163,7 +163,11 @@ Watch for silent regressions in:
   rewrite) but is no longer the recommended path — see README "On native
   Linux (file ownership)".
 - No secrets in the image or in `ENV`/`ARG` — credentials are mounted or
-  passed at `docker run` time.
+  passed at `docker run` time. This applies to any token or secret env
+  variable a skill/tool needs (e.g. `GITHUB_TOKEN`), not just model provider
+  API keys — use `-e VAR` (forwarding an already-exported shell variable) or
+  `--env-file` with a plain `KEY=VALUE` file; never `source ~/.bashrc` into
+  the container. See README.md "Passing tokens and secrets for skills/tools".
 - OCI label args (`VERSION`, `REVISION`) are for automation; do not hardcode
   build metadata into the opencode/opencode.Dockerfile.
 - Comments in the opencode/opencode.Dockerfile explain *why*, not *what*; keep them when
