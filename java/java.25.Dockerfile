@@ -52,6 +52,19 @@ RUN arch="$(uname -m)" && \
 ENV JAVA_HOME=/usr/lib/jvm/liberica-25 \
     PATH="/usr/lib/jvm/liberica-25/bin:${PATH}"
 
+# The JDK ships its own trust store (a copy of cacerts under
+# $JAVA_HOME/lib/security), separate from /etc/ssl/certs/ca-certificates.crt.
+# Appending the proxy CA above makes curl/apk trust it, but NOT java/mvnd —
+# without this second import, HTTPS calls made by the JVM (e.g. mvnd
+# resolving dependencies) still fail with "PKIX path building failed".
+# Default JDK keystore password ("changeit") is a public constant, not a secret.
+RUN --mount=type=secret,id=external_ca,required=false \
+    if [ -s /run/secrets/external_ca ]; then \
+      keytool -importcert -noprompt -trustcacerts \
+        -alias external-ca -file /run/secrets/external_ca \
+        -keystore "$JAVA_HOME/lib/security/cacerts" -storepass changeit; \
+    fi
+
 # --- Maven Daemon (mvnd) 1.0.x stable, checksum-verified ---
 # Not packaged in Wolfi. Installed from archive.apache.org (the archive host
 # keeps old releases, so pinned builds stay reproducible). mvnd bundles Maven;

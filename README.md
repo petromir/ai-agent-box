@@ -1,6 +1,6 @@
 # ai-agent-box
 
-A minimal, hardening-first container runtime for [OpenCode](https://opencode.ai) —
+A minimal, hardening-first container runtime for [OpenCode](https://opencode.ai) and [Oh-My-Pi](https://omp.sh) —
 the AI coding agent for your terminal — built on
 [Chainguard Wolfi](https://github.com/chainguard-images/images/tree/main/images/wolfi-base)
 with a pinned digest, a non-root user, and an entrypoint that transparently
@@ -21,9 +21,6 @@ and the root filesystem are only as locked down as the flags you pass to
 `docker run`. See [Hardening: keeping the agent scoped to
 `/workspace`](#hardening-keeping-the-agent-scoped-to-workspace) for the flags
 that close that gap.
-
-Prefer [omp](https://omp.sh) (Oh-My-Pi) over OpenCode? The same box is
-available as the [omp variant](#variant-omp-oh-my-pi).
 
 ## Build
 
@@ -663,6 +660,15 @@ Things to keep in mind:
   opencode/opencode.Dockerfile does (see [Building behind a TLS-intercepting
   proxy](#building-behind-a-tls-intercepting-proxy)) before your own
   `apk add`/`curl` calls.
+- **A JVM needs the CA imported twice.** A JDK ships its own trust store (a
+  copy of `cacerts` under `$JAVA_HOME/lib/security`), separate from
+  `/etc/ssl/certs/ca-certificates.crt`. Appending the proxy CA to the system
+  bundle makes `curl`/`apk` trust it but does NOT make `java`/`mvnd` trust
+  it — without a second `keytool -importcert ... -keystore
+  "$JAVA_HOME/lib/security/cacerts" -storepass changeit` step after
+  installing the JDK, JVM-side HTTPS calls (e.g. Maven resolving
+  dependencies) still fail with `PKIX path building failed`. See
+  `java/java.25.Dockerfile` for the worked-example step.
 - **Expect the image to grow.** Toolchains like a JDK and Maven add real
   weight (often 300–500 MB combined); the "minimal" sizing in this README
   applies to the unmodified base image, not your derived one.
