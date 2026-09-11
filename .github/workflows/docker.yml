@@ -1,0 +1,168 @@
+# CI/CD for the ai-agent-box images.
+#
+#   test    — every PR and every push to master: builds all three images
+#             (opencode, omp, java) and runs the repo's own verification
+#             suite, tests/run-tests.sh (the AGENTS.md "Verify every change"
+#             checklist: default/root/adaptation/arbitrary-uid paths, serve,
+#             hardening, bundled shellcheck).
+#   publish — pushes to master only, after test passes: builds each image
+#             with buildx (linux/amd64) and pushes it to Docker Hub under
+#             the account named by the DOCKERHUB_USERNAME secret:
+#               ai-agent-box       <- opencode/opencode.Dockerfile
+#               ai-agent-box-omp   <- omp/omp.Dockerfile
+#               ai-agent-box-java  <- java/java.25.Dockerfile (derived)
+#
+# Required repository secrets (Settings > Secrets and variables > Actions):
+#   DOCKERHUB_USERNAME — Docker Hub user/org; also used as the image namespace
+#   DOCKERHUB_TOKEN    — Docker Hub access token with read/write permission
+#
+# Image tags track the versions pinned in the Dockerfiles (single source of
+# truth), so bumping e.g. ARG OPENCODE_VERSION automatically publishes under
+# the new tag:
+#   ai-agent-box:<OPENCODE_VERSION>, ai-agent-box:latest
+#   ai-agent-box-omp:<OMP_VERSION>,  ai-agent-box-omp:latest
+#   ai-agent-box-java:<JDK major>,   ai-agent-box-java:latest
+
+name: Docker CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+# Least privilege: every job only reads the repository by default; publish
+# additionally needs actions: write for the buildx layer cache (type=gha).
+permissions:
+  contents: read
+
+# Superseded PR runs are cancelled (builds are long); master runs queue
+# instead of cancelling so a publish is never killed mid-push.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Full suite: builds all three images and runs every behavioral check.
+      # Needs no secrets, so PRs from forks run it safely.
+      - name: Run image test suite
+        run: tests/run-tests.sh
+
+  publish:
+    name: Publish to Docker Hub
+    # if: github.event_name == 'push'
+    if: false
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: write # buildx GitHub Actions layer cache (cache-to: type=gha)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Fail early with an actionable message instead of a cryptic
+      # "input required" from the login step.
+      - name: Check publish credentials are configured
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::error::Set the DOCKERHUB_USERNAME and DOCKERHUB_TOKEN repository secrets (Settings > Secrets and variables > Actions) to publish images."
+            exit 1
+          fi
+
+      # Read the pinned versions straight from the Dockerfiles so registry
+      # tags always match what is actually built. Fail closed if a pin moves
+      # or is renamed: publishing under an empty tag would be worse.
+      - name: Resolve pinned versions from the Dockerfiles
+        id: versions
+        run: |
+          opencode=$(sed -n 's/^ARG OPENCODE_VERSION=//p' opencode/opencode.Dockerfile)
+          omp=$(sed -n 's/^ARG OMP_VERSION=//p' omp/omp.Dockerfile)
+          jdk=$(sed -n 's/^ARG LIBERICA_VERSION=//p' java/java.25.Dockerfile | cut -d. -f1)
+          if [ -z "$opencode" ] || [ -z "$omp" ] || [ -z "$jdk" ]; then
+            echo "::error::Could not extract a pinned version (OPENCODE_VERSION / OMP_VERSION / LIBERICA_VERSION) from the Dockerfiles; refusing to guess registry tags."
+            exit 1
+          fi
+          {
+            echo "opencode=$opencode"
+            echo "omp=$omp"
+            echo "jdk=$jdk"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # linux/amd64 only (the published-images decision): the Dockerfiles pin
+      # per-arch SHA256s for both amd64 and arm64, so adding linux/arm64 here
+      # later needs no Dockerfile change, only a QEMU setup step.
+      # provenance=false keeps each published tag a plain single-platform
+      # image manifest instead of a manifest index carrying an attestation
+      # artifact — least surprise for docker pull/skopeo/registry mirrors.
+      - name: Build and push ai-agent-box (opencode)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: opencode/opencode.Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          build-args: |
+            REVISION=${{ github.sha }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/ai-agent-box:${{ steps.versions.outputs.opencode }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/ai-agent-box:latest
+          cache-from: type=gha,scope=opencode
+          cache-to: type=gha,mode=max,scope=opencode
+
+      - name: Build and push ai-agent-box-omp
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: omp/omp.Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          build-args: |
+            REVISION=${{ github.sha }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/ai-agent-box-omp:${{ steps.versions.outputs.omp }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/ai-agent-box-omp:latest
+          cache-from: type=gha,scope=omp
+          cache-to: type=gha,mode=max,scope=omp
+
+      # Derives from the opencode image pushed just above, referenced by its
+      # immutable version tag (not :latest), so the java image always layers
+      # on the exact base published from this commit. The base image's OCI
+      # labels (including REVISION) are inherited through FROM.
+      - name: Build and push ai-agent-box-java
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: java/java.25.Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          build-args: |
+            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/ai-agent-box:${{ steps.versions.outputs.opencode }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/ai-agent-box-java:${{ steps.versions.outputs.jdk }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/ai-agent-box-java:latest
+          cache-from: type=gha,scope=java
+          cache-to: type=gha,mode=max,scope=java

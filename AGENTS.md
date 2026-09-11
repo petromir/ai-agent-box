@@ -28,14 +28,14 @@ all checks below (`--skip-build` reuses built images, `--only opencode,omp,java`
 runs a subset); prefer it over running the commands by hand:
 
 ```bash
-docker build -f opencode/opencode.Dockerfile -t ai-agent-box:local .
+docker build -f opencode/opencode.Dockerfile -t ai-agent-box:1.18.30 .
 
 # 1. Default (non-root) path
-docker run --rm ai-agent-box:local --version
+docker run --rm ai-agent-box:1.18.30 --version
 
 # 2. Root/uid-adaptation path: create a repo owned by a non-10001 uid
 #    (chown it to 999), then:
-docker run --rm --user 0 -v /path/to/repo:/workspace ai-agent-box:local --version
+docker run --rm --user 0 -v /path/to/repo:/workspace ai-agent-box:1.18.30 --version
 # and confirm "adapting uid/gid..." appears on stderr, and inside the
 # container `git -C /workspace status` succeeds and the adapted user can
 # write to ~/.config/opencode (e.g. `touch` a file there as the user).
@@ -43,11 +43,11 @@ docker run --rm --user 0 -v /path/to/repo:/workspace ai-agent-box:local --versio
 # 3. Serve path: the entrypoint injects --hostname 0.0.0.0 for the `serve`
 #    subcommand so a published port reaches the server. Confirm health, and
 #    that an explicit --hostname override is honored.
-docker run --rm -d -p 4096:4096 --name opencode-server ai-agent-box:local serve
+docker run --rm -d -p 4096:4096 --name opencode-server ai-agent-box:1.18.30 serve
 curl -s http://localhost:4096/global/health   # {"healthy":true,"version":"..."}
 docker rm -f opencode-server   # opencode serve ignores SIGTERM/SIGINT; rm -f force-kills
 # Override must bind loopback (unreachable from host via -p):
-docker run --rm -d -p 4097:4097 --name oc-lb ai-agent-box:local serve --port 4097 --hostname 127.0.0.1
+docker run --rm -d -p 4097:4097 --name oc-lb ai-agent-box:1.18.30 serve --port 4097 --hostname 127.0.0.1
 curl -s --max-time 3 http://localhost:4097/global/health || echo unreachable-as-expected
 docker rm -f oc-lb
 
@@ -55,12 +55,12 @@ docker rm -f oc-lb
 #    PLAN-arbitrary-uid-home-layout.md and README "On native Linux"): an
 #    arbitrary uid with gid 0 can write the home tree and use git with NO
 #    uid/gid rewrite and NO root at any point.
-docker run --rm --user 999:0 ai-agent-box:local --version
+docker run --rm --user 999:0 ai-agent-box:1.18.30 --version
 # same uid WITHOUT gid 0 in any form must NOT be able to write:
-docker run --rm --user 999:999 --entrypoint sh ai-agent-box:local \
+docker run --rm --user 999:999 --entrypoint sh ai-agent-box:1.18.30 \
   -c 'touch "$HOME/.config/opencode/.probe" && echo OK || echo FAIL-as-expected'
 # the zero-`--user` default must stay byte-for-byte unchanged (uid=10001 gid=10001):
-docker run --rm --entrypoint sh ai-agent-box:local -c 'id -u; id -g'
+docker run --rm --entrypoint sh ai-agent-box:1.18.30 -c 'id -u; id -g'
 ```
 
 The omp variant carries the same obligation (there is no serve check — omp has
@@ -68,22 +68,29 @@ no HTTP server; its entry points are the TUI, one-shot `-p`, RPC, and ACP over
 stdio):
 
 ```bash
-docker build -f omp/omp.Dockerfile -t ai-agent-box:omp-local .
+docker build -f omp/omp.Dockerfile -t ai-agent-box:v18.1.17 .
 
 # 1. Default (non-root) path
-docker run --rm ai-agent-box:omp-local --version   # omp/<version>
+docker run --rm ai-agent-box:v18.1.17 --version   # omp/<version>
 
 # 2. Root/uid-adaptation path: same foreign-uid setup as above, then:
-docker run --rm --user 0 -v /path/to/repo:/workspace ai-agent-box:omp-local --version
+docker run --rm --user 0 -v /path/to/repo:/workspace ai-agent-box:v18.1.17 --version
 # and confirm "adapting uid/gid..." appears on stderr and the adapted user
 # can write to ~/.omp and ~/.omp/agent (e.g. `touch` a file there as the user).
 
 # 3. Arbitrary-uid path (same rationale as opencode above):
-docker run --rm --user 999:0 ai-agent-box:omp-local --version
-docker run --rm --user 999:999 --entrypoint sh ai-agent-box:omp-local \
+docker run --rm --user 999:0 ai-agent-box:v18.1.17 --version
+docker run --rm --user 999:999 --entrypoint sh ai-agent-box:v18.1.17 \
   -c 'touch "$HOME/.omp/.probe" && echo OK || echo FAIL-as-expected'
-docker run --rm --entrypoint sh ai-agent-box:omp-local -c 'id -u; id -g'
+docker run --rm --entrypoint sh ai-agent-box:v18.1.17 -c 'id -u; id -g'
 ```
+
+CI runs the same suite for you: `.github/workflows/docker.yml` executes
+`tests/run-tests.sh` on every pull request and push to `master`, and on
+master it additionally publishes all three images to Docker Hub (see
+README.md "Continuous integration"). A change that fails the suite locally
+will fail CI identically — local verification stays mandatory anyway,
+because CI cannot tell you *why* the entrypoint broke.
 
 Watch for silent regressions in:
 
@@ -97,6 +104,34 @@ Watch for silent regressions in:
   (util-linux's setpriv, a separate binary from the BusyBox applet of the
   same name) is installed and used to drop privileges. Check tool flags
   before relying on them.
+- **shellcheck pin** — Wolfi has **no** `shellcheck` package (`apk search
+  shellcheck` is empty; Wolfi ships no GHC toolchain) and Alpine packages
+  cannot be mixed into a Wolfi image, so both Dockerfiles install upstream's
+  statically linked release `.tar.gz` with a pinned version plus pinned
+  per-architecture SHA256 (`SHELLCHECK_VERSION`,
+  `SHELLCHECK_SHA256_AMD64`/`SHELLCHECK_SHA256_ARM64`), in the builder stage
+  and `COPY --from=builder` like `fff-mcp`. Those `.tar.gz` assets exist only
+  from v0.11.0 (older tags publish `.tar.xz` only, and wolfi-base ships no xz
+  tool — BusyBox `unxz` at best; a Wolfi `xz` package exists but is not worth
+  an extra builder dependency for one tarball). Keep the version and both
+  SHA256s in sync across the two Dockerfiles and the `shellcheck_version`
+  constant in `tests/run-tests.sh`. Beware when a repo script mentions it in a
+  comment: a line starting `# shellcheck ` is parsed as a directive by the tool
+  itself (SC1072/SC1073 on the repo's own scripts).
+- **copyleft notices must ship** — the runtime stage copies ShellCheck's
+  `LICENSE.txt` plus a Corresponding-Source pointer (`SOURCE.txt`) to
+  `/usr/share/doc/shellcheck/`, Wolfi's own convention for package licenses
+  (`apk info -L jq` -> `usr/share/doc/jq/COPYING`). Pre-create that directory in
+  its own `RUN mkdir -m 0755`: `COPY --chmod` applies to directories it creates
+  too, so a `--chmod=644` copy that has to make the parent dir leaves a
+  non-traversable `0444` directory the non-root user cannot read. Any GPL/LGPL
+  binary added to the image needs the same treatment (the Wolfi packages
+  already do this for themselves — `bash`, `diffutils`, `busybox` are GPL too).
+  It changes nothing about this repo's own files: separate programs in one
+  filesystem are mere aggregation (GPLv3 §5), so
+  Apache-2.0 stays Apache-2.0; only ShellCheck itself carries GPLv3 duties, and
+  only on distribution. Keep ShellCheck a subprocess — linking its Haskell
+  library would make the linking program a derivative work.
 - **opencode install path** — the installer writes to `$HOME/.opencode/bin`;
   the builder stage pins `ENV HOME=/root` so the `COPY --from=builder` path
   is deterministic.
@@ -151,6 +186,15 @@ Watch for silent regressions in:
   to trust a local proxy CA for that build only. Never "fix" this by baking a
   CA into a `COPY`/`ARG` instead — that would ship a private, meaningless (or
   actively risky) root CA to everyone who pulls the published image.
+- **CI workflow parses the Dockerfile pins** — the publish job in
+  `.github/workflows/docker.yml` extracts registry tags with
+  `sed -n 's/^ARG OPENCODE_VERSION=//p'` (same for `OMP_VERSION` and
+  `LIBERICA_VERSION`): those ARG declarations must stay line-initial,
+  single-line, and keep their names, or publishing fails closed. A new image
+  variant needs a matching publish step there (and its base-image dependency
+  ordered after the base's push, like the java step). Third-party actions are
+  pinned to full commit SHAs matching this repo's pinning conventions — bump
+  the SHA and its trailing `# vX.Y.Z` comment together.
 
 ## Conventions
 
@@ -170,6 +214,11 @@ Watch for silent regressions in:
   the container. See README.md "Passing tokens and secrets for skills/tools".
 - OCI label args (`VERSION`, `REVISION`) are for automation; do not hardcode
   build metadata into the opencode/opencode.Dockerfile.
+- Do not put a hardcoded image **size** figure back into `README.md`'s "Image
+  details" table — it goes stale with every agent release (it did twice). The
+  row points at "How big is it?", which publishes the `docker images` /
+  `docker history` commands instead. Keep it that way; a dated snapshot inside
+  that section must say which arch and release it measured.
 - Comments in the opencode/opencode.Dockerfile explain *why*, not *what*; keep them when
   editing.
 - After changes, update `README.md` (image details, usage) if behavior,
@@ -211,8 +260,8 @@ supported when changing the runtime stage:
 - `java/java.25.Dockerfile` is the in-repo worked example of this pattern (Liberica
   JDK 25, mvnd, Python 3.13 via pinned, checksum-verified downloads — NOT
   SDKMAN, which is per-user and non-reproducible). Verify it after any base
-  change: `docker build -f opencode/opencode.Dockerfile -t ai-agent-box:local . && docker build -f
-  java/java.25.Dockerfile --build-arg BASE_IMAGE=ai-agent-box:local -t ai-agent-box:java .`
+  change: `docker build -f opencode/opencode.Dockerfile -t ai-agent-box:1.18.30 . && docker build -f
+  java/java.25.Dockerfile --build-arg BASE_IMAGE=ai-agent-box:1.18.30 -t ai-agent-box:java .`
   and run the same default/uid-adaptation/serve checks against
   `ai-agent-box:java`. When bumping its pinned tool versions, refresh the
   checksums: Liberica SHA1s via `api.bell-sw.com/v1/liberica/releases`

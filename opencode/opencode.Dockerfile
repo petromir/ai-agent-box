@@ -23,7 +23,7 @@ RUN apk add --no-cache \
 # what's actually installed.
 # Override both --build-arg OPENCODE_VERSION and --build-arg VERSION together
 # to bump or to pin a different release.
-ARG OPENCODE_VERSION=1.18.29
+ARG OPENCODE_VERSION=1.18.30
 
 # Official install command; drops the binary at $HOME/.opencode/bin/opencode.
 # HOME is pinned explicitly: the base image config sets no HOME, so the install
@@ -56,6 +56,51 @@ RUN arch="$(uname -m)" && \
     echo "${sha}  /tmp/fff-mcp" | sha256sum -c - && \
     chmod +x /tmp/fff-mcp
 
+# ShellCheck (https://github.com/koalaman/shellcheck): shell-script static
+# analyzer, so the agent can lint the shell it writes (entrypoints, CI glue,
+# `*.sh` under /workspace) instead of eyeballing it. Installed as a pinned
+# version + pinned per-architecture SHA256 taken straight from the GitHub
+# release — the same fail-closed pattern as fff-mcp above. There is no Wolfi
+# package for it (`apk search shellcheck` is empty; Wolfi ships no GHC
+# toolchain), and Alpine does package it but Alpine packages cannot be mixed
+# into a Wolfi image, so the upstream static binary is the only practical
+# source. The `.tar.gz` asset is used rather than the `.tar.xz` one because
+# wolfi-base ships no xz tool (BusyBox provides only an `unxz` applet; a Wolfi
+# `xz` package exists, but pulling it in just to extract one tarball would be
+# pointless), while BusyBox tar reads gzip natively.
+# GPLv3 duties are handled mechanically: the license text and a
+# Corresponding-Source pointer are copied into the runtime stage next to the
+# binary (see the COPY steps below). Nothing else in the image is affected —
+# separate programs in one filesystem are "mere aggregation" (GPLv3 §5), so
+# this repo's Apache-2.0 files, the agent binary, and any derived-image code
+# keep their own licenses. shellcheck is invoked as a subprocess only; never
+# link against its Haskell library, which would make the linking program a
+# derivative work.
+ARG SHELLCHECK_VERSION=v0.11.0
+ARG SHELLCHECK_SHA256_AMD64=b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
+ARG SHELLCHECK_SHA256_ARM64=68a8133197a50beb8803f8d42f9908d1af1c5540d4bb05fdfca8c1fa47decefc
+RUN arch="$(uname -m)" && \
+    case "$arch" in \
+      x86_64)  sc_arch=x86_64;  sha="$SHELLCHECK_SHA256_AMD64" ;; \
+      aarch64) sc_arch=aarch64; sha="$SHELLCHECK_SHA256_ARM64" ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac && \
+    if [ -z "$sha" ]; then echo "no shellcheck SHA256 pinned for $arch; set SHELLCHECK_SHA256_* for your arch" >&2; exit 1; fi && \
+    curl -fsSL -o /tmp/shellcheck.tar.gz \
+      "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.${sc_arch}.tar.gz" && \
+    echo "${sha}  /tmp/shellcheck.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/shellcheck.tar.gz -C /tmp && \
+    rm /tmp/shellcheck.tar.gz && \
+    mkdir -p /tmp/shellcheck-out && \
+    cp "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" /tmp/shellcheck-out/shellcheck && \
+    cp "/tmp/shellcheck-${SHELLCHECK_VERSION}/LICENSE.txt" /tmp/shellcheck-out/LICENSE.txt && \
+    rm -rf "/tmp/shellcheck-${SHELLCHECK_VERSION}" && \
+    { printf 'package:   shellcheck %s (statically linked upstream release binary)\n' "${SHELLCHECK_VERSION}"; \
+      printf 'license:   GNU General Public License, version 3 (text: LICENSE.txt in this directory)\n'; \
+      printf 'upstream:  https://github.com/koalaman/shellcheck\n'; \
+      printf 'source:    https://github.com/koalaman/shellcheck/archive/refs/tags/%s.tar.gz\n' "${SHELLCHECK_VERSION}"; \
+    } > /tmp/shellcheck-out/SOURCE.txt
+
 # --- Runtime stage: minimal image with a non-root user ---
 FROM cgr.dev/chainguard/wolfi-base:latest@sha256:a31344ab2cb8618db84f535eec56f76f6178b142cb92cb2e48676cc2dcebea72
 
@@ -63,7 +108,7 @@ FROM cgr.dev/chainguard/wolfi-base:latest@sha256:a31344ab2cb8618db84f535eec56f76
 # OPENCODE_VERSION above so a plain `docker build -f opencode/opencode.Dockerfile .`
 # produces an accurate label without extra args; keep the two in sync when bumping.
 ARG REVISION=unknown
-ARG VERSION=1.18.29
+ARG VERSION=1.18.30
 LABEL org.opencontainers.image.title="OpenCode" \
       org.opencontainers.image.description="AI coding agent for the terminal, installed via the official installer." \
       org.opencontainers.image.authors="Petromir Dzhunev" \
@@ -167,6 +212,18 @@ COPY --from=builder --chown=root:root --chmod=755 /root/.opencode/bin/opencode /
 # fff-mcp: static system binary, root-owned, same placement convention as
 # opencode above — not user state, so no arbitrary-uid ownership handling.
 COPY --from=builder --chown=root:root --chmod=755 /tmp/fff-mcp /usr/local/bin/fff-mcp
+
+# shellcheck: static system binary, root-owned, same placement convention as
+# fff-mcp above — not user state, so no arbitrary-uid ownership handling. Its
+# GPLv3 license text and a Corresponding-Source pointer ship beside it under
+# /usr/share/doc/shellcheck, which is Wolfi's own convention for package
+# licenses (`apk info -L jq` -> usr/share/doc/jq/COPYING).
+COPY --from=builder --chown=root:root --chmod=755 /tmp/shellcheck-out/shellcheck /usr/local/bin/shellcheck
+# Pre-create the doc directory: COPY --chmod applies to the directories it
+# creates as well as to the files, so letting it create this one yields a 0444
+# directory with no traverse bit — unreadable by the non-root runtime user.
+RUN mkdir -p -m 0755 /usr/share/doc/shellcheck
+COPY --from=builder --chown=root:root --chmod=644 /tmp/shellcheck-out/LICENSE.txt /tmp/shellcheck-out/SOURCE.txt /usr/share/doc/shellcheck/
 
 # Documents the default `opencode serve` HTTP port (metadata only; does not
 # publish — use `docker run -p 4096:4096` to expose it on the host).

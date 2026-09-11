@@ -6,6 +6,9 @@
 #
 #   opencode image (ai-agent-box:local)
 #     - build
+#     - bundled shellcheck: pinned version runs, flags a known issue, passes a
+#       clean script, and its GPLv3 license text + source pointer ship in the
+#       image (repeated for the omp and java images)
 #     - default (non-root) path: --version prints the release
 #     - root/uid-adaptation path (legacy --user 0): "adapting uid/gid..."
 #       message, adapted user can git-status /workspace and write
@@ -27,6 +30,7 @@
 #       ssh/whoami resolve the uid via the entrypoint's passwd self-heal
 #   omp image (ai-agent-box:omp-local)
 #     - build
+#     - bundled shellcheck: same checks as the opencode image
 #     - default (non-root) path: --version prints omp/<release>
 #     - root/uid-adaptation path (legacy --user 0): same as above for
 #       ~/.omp and ~/.omp/agent
@@ -39,6 +43,7 @@
 #   java image (ai-agent-box:java, derived from ai-agent-box:local)
 #     - build with BASE_IMAGE=ai-agent-box:local
 #     - default path: opencode --version plus java/mvnd/python3 toolchain
+#     - bundled shellcheck: same checks as the opencode image (inherited)
 #     - uid-adaptation path (legacy --user 0)
 #     - serve path (health + hostname override)
 #     - hardening: same checks as the opencode image (the arbitrary-uid path
@@ -72,6 +77,10 @@ oc_serve_port=14096
 oc_override_port=14097
 java_serve_port=14098
 java_override_port=14099
+
+# Must match ARG SHELLCHECK_VERSION in both Dockerfiles (v0.11.0 -> 0.11.0).
+# The upstream tool ships no Wolfi package, so its pin lives in the Dockerfile.
+shellcheck_version=0.11.0
 
 run_id=$$
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/ai-agent-box-tests.XXXXXX")
@@ -191,6 +200,17 @@ echo "whoami=$(whoami 2>&1)"
 echo "ssh=$(ssh -V 2>&1)"
 EOF
 
+    # Fixtures for the bundled linter: the first must produce SC2086, the
+    # second nothing.
+    cat > "$work_dir/shellcheck-bad.sh" <<'EOF'
+#!/bin/sh
+echo $1
+EOF
+    cat > "$work_dir/shellcheck-clean.sh" <<'EOF'
+#!/bin/sh
+echo "ok"
+EOF
+
     chmod +x "$work_dir"/fake-*.sh
 }
 
@@ -247,8 +267,8 @@ run_adaptation() {
 
 # wait_health <url> — prints the body once the endpoint answers (<=30s).
 wait_health() {
-    local i body
-    for i in $(seq 1 30); do
+    local body
+    for _ in $(seq 1 30); do
         body=$(curl -s --max-time 2 "$1" 2>/dev/null)
         if [ -n "$body" ]; then
             printf '%s' "$body"
@@ -284,7 +304,7 @@ test_serve() {
 # --hostname 0.0.0.0: reachable on loopback inside the container, unreachable
 # from the host through the published port.
 test_serve_override() {
-    local image=$1 label=$2 port=$3 name inside host_out i
+    local image=$1 label=$2 port=$3 name inside host_out
     name="lb-$label-$run_id"
     if ! docker run --rm -d -p "$port:$port" --name "$name" "$image" \
         serve --port "$port" --hostname 127.0.0.1 >/dev/null 2>&1; then
@@ -293,7 +313,7 @@ test_serve_override() {
     fi
     track "$name"
     inside=""
-    for i in $(seq 1 30); do
+    for _ in $(seq 1 30); do
         inside=$(docker exec "$name" curl -s --max-time 2 "http://127.0.0.1:$port/global/health" 2>/dev/null)
         [ -n "$inside" ] && break
         sleep 1
@@ -310,6 +330,38 @@ test_serve_override() {
         fi
     fi
     docker rm -f "$name" >/dev/null 2>&1
+}
+
+# --- bundled tooling: shellcheck --------------------------------------------
+
+# test_shellcheck <image> <label>
+# The bundled linter is installed as a pinned, checksum-verified upstream static
+# binary (no Wolfi package exists). Checks that it runs at the pinned version,
+# a known finding with a non-zero exit, passes a clean script, and that its
+# GPLv3 license text and Corresponding-Source pointer are present in the image:
+# those obligations attach as soon as the image is distributed.
+test_shellcheck() {
+    local image=$1 label=$2 out rc
+    out=$(docker run --rm --entrypoint shellcheck "$image" --version 2>&1); rc=$?
+    assert_exit0 "$label: shellcheck runs" "$rc" "$out"
+    assert_contains "$label: shellcheck version matches pin" "$out" "version: $shellcheck_version"
+    out=$(docker run --rm --entrypoint shellcheck \
+        -v "$work_dir/shellcheck-bad.sh:/sc-bad.sh:ro" "$image" /sc-bad.sh 2>&1); rc=$?
+    assert_contains "$label: shellcheck flags SC2086" "$out" "SC2086"
+    if [ "$rc" -eq 0 ]; then
+        bad "$label: shellcheck exits non-zero on findings" "exit 0; output: $(printf '%s' "$out" | head -c 200)"
+    else
+        ok "$label: shellcheck exits non-zero on findings"
+    fi
+    out=$(docker run --rm --entrypoint shellcheck \
+        -v "$work_dir/shellcheck-clean.sh:/sc-clean.sh:ro" "$image" /sc-clean.sh 2>&1); rc=$?
+    assert_exit0 "$label: shellcheck passes a clean script" "$rc" "$out"
+    out=$(docker run --rm --entrypoint sh "$image" \
+        -c 'cat /usr/share/doc/shellcheck/LICENSE.txt' 2>&1)
+    assert_contains "$label: shellcheck GPL license text ships" "$out" "GNU GENERAL PUBLIC LICENSE"
+    out=$(docker run --rm --entrypoint sh "$image" \
+        -c 'cat /usr/share/doc/shellcheck/SOURCE.txt' 2>&1)
+    assert_contains "$label: shellcheck source pointer ships" "$out" "refs/tags/v$shellcheck_version.tar.gz"
 }
 
 # --- hardening (README "Hardening: keeping the agent scoped to /workspace") -
@@ -592,7 +644,7 @@ test_omp_mounted_agent() {
     if [ -z "$(ls -A "$host_dir" 2>/dev/null)" ]; then
         ok "omp: mounted ~/.omp/agent left untouched"
     else
-        bad "omp: mounted ~/.omp/agent left untouched" "host mount now contains: $(ls -A "$host_dir" | tr '\n' ' ')"
+        bad "omp: mounted ~/.omp/agent left untouched" "host mount now contains: $(find "$host_dir" -mindepth 1 -maxdepth 1 | tr '\n' ' ')"
     fi
 }
 
@@ -672,6 +724,7 @@ if want opencode; then
     fi
     if have_image "$oc_image"; then
         test_opencode_default
+        test_shellcheck "$oc_image" opencode
         test_opencode_adaptation
         test_serve "$oc_image" opencode "$oc_serve_port" "$oc_ver"
         test_serve_override "$oc_image" opencode "$oc_override_port"
@@ -694,6 +747,7 @@ if want omp; then
     fi
     if have_image "$omp_image"; then
         test_omp_default
+        test_shellcheck "$omp_image" omp
         test_omp_adaptation
         test_omp_mounted_home
         test_omp_mounted_agent
@@ -719,6 +773,7 @@ if want java; then
     fi
     if have_image "$java_image"; then
         test_java_default
+        test_shellcheck "$java_image" java
         test_java_adaptation
         test_serve "$java_image" java "$java_serve_port" "$java_ver"
         test_serve_override "$java_image" java "$java_override_port"
